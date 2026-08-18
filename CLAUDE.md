@@ -88,10 +88,10 @@ cc -o test_pfx src/dsp/test_perf_fx.c src/dsp/perf_fx_dsp.c -Isrc/dsp -lm && ./t
 ## Release
 
 1. Update version in `src/module.json`
-2. Commit: `git commit -am "bump version to 0.2.0"`
-3. Tag and push: `git tag v0.2.0 && git push --tags`
+2. Commit: `git commit -am "bump version to X.Y.Z"`
+3. Tag and push: `git tag vX.Y.Z && git push --tags`
 4. GitHub Actions builds and uploads tarball
-5. Add release notes: `gh release edit v0.2.0 --notes "- Changes here"`
+5. Add release notes: `gh release edit vX.Y.Z --notes "- Changes here"`
 
 ## Host Requirements
 
