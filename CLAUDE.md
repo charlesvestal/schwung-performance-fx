@@ -113,7 +113,7 @@ Hosts that predate the capability **ignore it** and there is no fallback needed:
 
 So on an older host the module still works; it just needs Move→Schwung enabled
 to hear Move, which is the ~16ms Link Audio round trip that `end_of_chain`
-exists to avoid. Requires host **0.11.7+** (first release containing the
+exists to avoid. Requires host **0.12.0+** (first release containing the
 capability) for the routing-free path.
 
 ### Host tempo
