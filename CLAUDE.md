@@ -97,3 +97,32 @@ cc -o test_pfx src/dsp/test_perf_fx.c src/dsp/perf_fx_dsp.c -Isrc/dsp -lm && ./t
 
 - **Minimum host version**: 0.7.10
 - Uses `audio_fx_api_v2` interface (available since early host versions)
+
+### End-of-chain FX placement
+
+`"end_of_chain": true` in `capabilities` asks the host to run this module on the
+final Move+ME mix instead of the ME bus alone, so Move's own tracks are
+processed without Link Audio routing.
+
+Hosts that predate the capability **ignore it** and there is no fallback needed:
+
+- **Move→Schwung ON** — unchanged. The host sets `fx_target = mailbox_audio`
+  under `rebuild_from_la`, which already is the full mix, so Move's audio
+  reaches this module through the existing path.
+- **Move→Schwung OFF** — ME bus only, the pre-0.1.0 behaviour.
+
+So on an older host the module still works; it just needs Move→Schwung enabled
+to hear Move, which is the ~16ms Link Audio round trip that `end_of_chain`
+exists to avoid. Requires host **0.11.7+** (first release containing the
+capability) for the routing-free path.
+
+### Host tempo
+
+The DSP follows the host's project tempo via `host_api_v1_t.get_bpm()`, which
+has been present and populated since well before 0.11.6 — no host upgrade
+needed. MIDI clock never reaches the module (`onMidiMessageInternal` drops
+0xF8), so `get_bpm()` is the only route; it resolves through the host's
+`sampler_get_bpm()` chain and works with no clock running.
+
+Keep `src/dsp/plugin_api_v1.h` in sync with `schwung/src/host/plugin_api_v1.h`.
+It drifted once and silently hid four host capabilities, `get_bpm` among them.
