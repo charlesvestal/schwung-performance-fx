@@ -214,6 +214,20 @@ const ANNOUNCE_THROTTLE_MS = 150;
 /* LED init */
 let ledInitPending = true;
 let ledInitIndex = 0;
+/* Repainting after a resume is a timing problem: the host's 0->2 entry queues
+ * an all-LEDs-off sweep on the audio side and exposes no "sweep finished"
+ * signal on the resume path (a fresh load gets one — deferred init waits for
+ * clearLedBatch() AND OVERTAKE_INIT_DELAY_TICKS=30 before calling init()).
+ *
+ * So: wait at least as long as a fresh load does, then repaint — and repaint
+ * again twice more, because the host's flushLedQueue only drains 16 writes per
+ * tick and our ~55 take several ticks, any of which can still be overrun.
+ * Cheap insurance; a forced repaint of an already-correct surface is invisible. */
+const LED_RESUME_DELAY_TICKS = 30;
+const LED_RESUME_REPEAT_TICKS = 20;
+const LED_RESUME_REPEATS = 2;
+let ledResumeDelay = 0;
+let ledResumeRepeatsLeft = 0;
 
 /* BPM and tap tempo */
 let bpm = 120.0;
@@ -448,6 +462,20 @@ function refreshAllPadLEDs() {
     for (let i = 0; i < NUM_SLOTS; i++) {
         setLED(PAD_NOTES[i], getPadColor(i));
     }
+}
+
+/* Repaint every LED this module owns, bypassing the cache.
+ * Needed on resume: init() is not re-run, and setLED/setButtonLED are
+ * cache-guarded by a module-scope cache in the shared helper that survives the
+ * park — so an ordinary repaint would be silently skipped even though Move has
+ * painted over the hardware in the meantime. */
+function repaintAllModuleLEDs() {
+    for (let i = 0; i < NUM_SLOTS; i++) setLED(PAD_NOTES[i], getPadColor(i), true);
+    for (let i = 0; i < 16; i++) setLED(MoveSteps[i], Black, true);
+    for (let i = 0; i < 4; i++) setButtonLED(TRACK_CCS[i], WhiteLedDim, true);
+    setButtonLED(MoveUndo, bypassed ? WhiteLedBright : WhiteLedDim, true);
+    setButtonLED(MoveBack, WhiteLedDim, true);
+    setButtonLED(MoveShift, WhiteLedDim, true);
 }
 
 /* Turn off every LED this module owns. Must run before host_exit_module():
@@ -995,7 +1023,54 @@ globalThis.onUnload = function() {
     clearAllModuleLEDs();
 };
 
+/* Called by the host when this module is un-parked. init() is deliberately not
+ * re-run, so anything init() would have set up has to be re-established here.
+ * Latched FX are still running in the DSP — we are only restoring the surface. */
+globalThis.onResume = function() {
+    /* Do NOT paint here. The host's 0->2 entry transition queues an
+     * all-LEDs-off sweep on the audio side, which runs progressively over the
+     * next few frames and would wipe anything painted now — on a fresh load the
+     * deferred init() waits for that sweep to finish, but resume has no such
+     * gate. Defer instead, and force the writes when they happen: setLED is
+     * cache-guarded by a module-scope cache that survives the park, so an
+     * ordinary repaint after the sweep would be skipped as "already set". */
+    ledResumeDelay = LED_RESUME_DELAY_TICKS;
+    ledResumeRepeatsLeft = LED_RESUME_REPEATS;
+    overlayTimer = 0;          /* drop any overlay frozen from before the park */
+    hostBpmPollCounter = 0;    /* re-check the project tempo promptly */
+    syncHostBpm(true);
+};
+
 globalThis.tick = function() {
+    /* Parked in the background: the host has swapped the draw and LED bindings
+     * for no-ops, but host_flush_display() is NOT one of them — flushing here
+     * would push our stale buffer over whatever Move is showing. Keep the param
+     * work (a latched effect is still running and still wants its knob values
+     * and the stuck-FX reconcile) and skip the entire surface. */
+    if (globalThis.overtakeParked) {
+        drainCriticalRetries();
+        drainParamQueue();
+        if (++reconcileCounter >= RECONCILE_TICKS) {
+            reconcileCounter = 0;
+            reconcileWithDsp();
+        }
+        return;
+    }
+
+    if (ledResumeDelay > 0) {
+        if (--ledResumeDelay === 0) {
+            repaintAllModuleLEDs();
+            if (ledResumeRepeatsLeft > 0) {
+                ledResumeRepeatsLeft--;
+                ledResumeDelay = LED_RESUME_REPEAT_TICKS;
+            }
+        }
+        /* Keep the display alive while we wait — only the LEDs are deferred. */
+        if (overlayTimer > 0) drawOverlay(); else drawMainView();
+        host_flush_display();
+        return;
+    }
+
     if (ledInitPending) {
         setupLedBatch();
         return;
