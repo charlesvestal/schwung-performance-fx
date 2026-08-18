@@ -616,16 +616,57 @@ function getTimeLabel(rate01) {
  * Queue non-critical params and drain them 1 per tick.
  * Critical params (on/off/latch) use the blocking variant. */
 const paramQueue = [];
+/* [key, value, attempts] for critical sends the host refused. */
+let criticalRetries = [];
+/* Reconcile local FX state against the DSP's own view periodically. A dropped
+ * punch_N_off cannot be detected locally: handlePadOff() clears fxActive before
+ * the send, so the UI already believes the effect is off while the DSP still
+ * has it running. The DSP is the only authority. */
+const RECONCILE_TICKS = 120;   /* ~2s */
+let reconcileCounter = 0;
 const PARAMS_PER_TICK = 2;  /* drain up to 2 queued params per tick */
+
+/* Critical sends (punch on/off/latch) go out blocking, because a dropped one
+ * leaves an effect stuck on with nothing to correct it.
+ *
+ * host_module_set_param_blocking -> shadow_set_param_timeout returns FALSE when
+ * the single param mailbox is busy, and the 50ms timeout makes that likelier
+ * exactly when it matters: our own pressure stream writes to the same mailbox
+ * fire-and-forget, and it is busiest while a pad is held hard. The return value
+ * used to be discarded. Retry instead, with a longer timeout — the failure is
+ * contention, so a second attempt a tick later usually lands. */
+function sendCritical(key, v, timeoutMs) {
+    if (typeof host_module_set_param_blocking === 'function') {
+        /* Older hosts return undefined rather than a bool — treat only an
+         * explicit false as failure so we never retry-storm against them. */
+        return host_module_set_param_blocking(key, v, timeoutMs || 50) !== false;
+    }
+    host_module_set_param(key, v);
+    return true;
+}
+
+function drainCriticalRetries() {
+    if (criticalRetries.length === 0) return;
+    const pending = criticalRetries;
+    criticalRetries = [];
+    for (let i = 0; i < pending.length; i++) {
+        const key = pending[i][0], v = pending[i][1], attempts = pending[i][2];
+        if (sendCritical(key, v, 200)) continue;
+        if (attempts < 4) {
+            criticalRetries.push([key, v, attempts + 1]);
+        } else {
+            console.log(`[pfx] critical param dropped after 5 tries: ${key}=${v}`);
+        }
+    }
+}
 
 function sendParam(key, value) {
     const v = String(value);
     /* Critical: note on/off/latch must be delivered immediately */
     if (key.endsWith('_on') || key.endsWith('_off') || key.endsWith('_latch')) {
-        if (typeof host_module_set_param_blocking === 'function') {
-            host_module_set_param_blocking(key, v, 50);
-        } else {
-            host_module_set_param(key, v);
+        if (!sendCritical(key, v)) {
+            console.log(`[pfx] critical param send failed, queued for retry: ${key}=${v}`);
+            criticalRetries.push([key, v, 0]);
         }
         return;
     }
@@ -877,6 +918,29 @@ function handleJogScroll(delta) {
     showOverlay('Tempo', `${bpm.toFixed(1)} BPM`, (bpm / 300).toFixed(2));
 }
 
+/* Ask the DSP which effects it actually has running and shut down any that
+ * every local signal says should be off. Deliberately conservative: it only
+ * acts when the slot is not held, not latched and not locally active, so a
+ * legitimately-running effect can never be cut. */
+function reconcileWithDsp() {
+    let activeStr;
+    try {
+        activeStr = getParam('fx_active');
+    } catch (e) { return; }
+    if (!activeStr) return;
+    let active;
+    try { active = JSON.parse(activeStr); } catch (e) { return; }
+    if (!Array.isArray(active)) return;
+
+    for (let i = 0; i < NUM_SLOTS; i++) {
+        if (active[i] === 1 && !fxActive[i] && !fxLatched[i] && !fxHeld[i]) {
+            console.log(`[pfx] stuck FX repaired: slot ${i} (${FX_NAMES[i]}) — DSP had it on, UI did not`);
+            sendParam(`punch_${i}_off`, '1');
+            refreshPadLED(i);
+        }
+    }
+}
+
 function syncFxState() {
     try {
         const activeStr = getParam('fx_active');
@@ -937,8 +1001,17 @@ globalThis.tick = function() {
         return;
     }
 
+    /* Retry any critical send the host refused, before anything else queues. */
+    drainCriticalRetries();
+
     /* Drain queued params (pressure, knob values, etc.) */
     drainParamQueue();
+
+    /* Backstop for a punch-off that never landed. */
+    if (++reconcileCounter >= RECONCILE_TICKS) {
+        reconcileCounter = 0;
+        reconcileWithDsp();
+    }
 
     /* Follow the project tempo (cheap poll — the host updates it as clock
      * arrives, and syncHostBpm() no-ops unless the value actually moved). */
