@@ -92,7 +92,20 @@ typedef struct {
     pfx_track_audio_shm_t *track_shm;
     uint32_t last_track_seq;
     int16_t track_bufs[4][PFX_TRACK_SHM_FRAMES * 2];
+    /* Follow the host's project tempo until the user sets one explicitly.
+     * The host resolves BPM through sampler_get_bpm(): internal transport →
+     * live MIDI clock → last clock → current Set tempo → settings → 120, so
+     * this works with no clock running and without MIDI sync enabled.
+     * Cleared the moment a "bpm" param arrives (tap tempo / tempo knob), so
+     * a manual tempo is never stomped by the host value. */
+    int follow_host_bpm;
+    int bpm_poll_countdown;
 } pfx_instance_t;
+
+/* Re-poll the host tempo every ~32 blocks (~93ms at 128 frames / 44.1kHz).
+ * get_bpm() is a cheap float read, but there is no reason to call it per
+ * block — tempo does not move that fast. */
+#define PFX_BPM_POLL_BLOCKS 32
 
 static void log_msg(const char *fmt, ...) {
     if (!g_host || !g_host->log) return;
@@ -115,6 +128,8 @@ static void *fx_create(const char *module_dir, const char *config_json) {
         snprintf(inst->module_dir, sizeof(inst->module_dir), "%s", module_dir);
 
     pfx_engine_init(&inst->engine);
+    inst->follow_host_bpm = 1;
+    inst->bpm_poll_countdown = 0;
 
     /* Wire up log callback so engine can log diagnostics */
     inst->engine.log_fn = (g_host && g_host->log) ? g_host->log : NULL;
@@ -191,6 +206,15 @@ static void fx_process_block(void *instance, int16_t *audio_inout, int frames) {
         inst->engine.track_audio_valid = 0;
     }
 
+    /* Track the host's project tempo unless the user has set one. */
+    if (inst->follow_host_bpm && g_host && g_host->get_bpm) {
+        if (--inst->bpm_poll_countdown <= 0) {
+            inst->bpm_poll_countdown = PFX_BPM_POLL_BLOCKS;
+            float hb = g_host->get_bpm();
+            if (hb >= 20.0f && hb <= 300.0f) inst->engine.bpm = hb;
+        }
+    }
+
     inst->engine.direct_input = audio_inout;
     pfx_engine_render(&inst->engine, audio_inout, frames);
     inst->engine.direct_input = NULL;
@@ -213,7 +237,18 @@ static void fx_set_param(void *instance, const char *key, const char *val) {
     if (strcmp(key, "repeat_speed") == 0) { e->repeat_speed = clampf(fval, 0, 1); return; }
 
     /* Engine params */
-    if (strcmp(key, "bpm") == 0) { e->bpm = clampf(fval, 20, 300); return; }
+    /* An explicit bpm means the user tapped or turned the tempo knob — stop
+     * following the host from here on. "bpm_follow_host" re-arms it. */
+    if (strcmp(key, "bpm") == 0) {
+        e->bpm = clampf(fval, 20, 300);
+        inst->follow_host_bpm = 0;
+        return;
+    }
+    if (strcmp(key, "bpm_follow_host") == 0) {
+        inst->follow_host_bpm = ival ? 1 : 0;
+        inst->bpm_poll_countdown = 0;   /* re-poll on the next block */
+        return;
+    }
     if (strcmp(key, "bypass") == 0) { e->bypassed = ival; return; }
     if (strcmp(key, "pressure_curve") == 0) { e->pressure_curve = ival; return; }
     if (strcmp(key, "audio_source") == 0) { e->audio_source = ival; return; }

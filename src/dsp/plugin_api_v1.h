@@ -1,5 +1,5 @@
 /*
- * Move Anything Plugin API v1
+ * Schwung Plugin API v1
  *
  * Stable ABI for DSP modules loaded by the host runtime.
  * Modules are .so files loaded via dlopen() and must export move_plugin_init_v1().
@@ -80,6 +80,42 @@ typedef struct host_api_v1 {
     move_mod_emit_value_fn mod_emit_value;
     move_mod_clear_source_fn mod_clear_source;
     void *mod_host_ctx;
+
+    /* Tempo query — returns current BPM (120.0 default).
+     * Uses sampler_get_bpm() fallback chain: MIDI clock → set tempo → settings → 120.
+     * NULL if host does not support tempo. */
+    float (*get_bpm)(void);
+
+    /* Inject a USB-MIDI packet into Move's MIDI_IN as if it came from
+     * internal hardware (pads/knobs). The drain forces cable 0 so Move
+     * treats the event as native input — no MIDI_OUT cable-2 echo.
+     *
+     * msg: 4-byte USB-MIDI packet [cable|CIN, status, data1, data2]
+     *      The cable nibble is ignored (always forced to 0 by the drain).
+     * len: must be 4
+     * Returns: bytes queued, or 0 on failure (SHM unavailable, ring full).
+     *
+     * NULL if host does not support MIDI-IN injection (non-shadow host).
+     * Rate-limited to 8 packets/tick at the drain; callers should not
+     * burst more than that per render block. */
+    int (*midi_inject_to_move)(const uint8_t *msg, int len);
+
+    /* Return the receive channel for the slot owning this plugin instance.
+     * -1 = All (no filter), 0-15 = specific channel byte, -2 = instance not
+     * registered (e.g. master FX, host-level plugin).
+     *
+     * Use this to address Move tracks via midi_inject_to_move: the inject
+     * channel must be the slot's recv channel, NOT the slot's
+     * forward_channel (which is purely an internal synth-side routing hint,
+     * e.g. minijv part 6). NULL if the host doesn't expose slot context. */
+    int (*slot_recv_channel)(void *instance);
+
+    /* Beats since transport start of the active clock source (Move's native
+     * sequencer, or an internal module's emitted clock), derived from
+     * 24-PPQN realtime ticks and interpolated per block. Returns < 0 when
+     * no transport is running — callers must fall back (e.g. LFO free-run).
+     * Appended in 2026-07; may be NULL on older hosts, always guard. */
+    double (*get_beat_position)(void);
 
 } host_api_v1_t;
 

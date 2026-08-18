@@ -221,6 +221,27 @@ let tapTimes = [];
 const TAP_TIMEOUT = 2000;
 const TAP_MIN_TAPS = 2;
 
+/* Host tempo follow lives in the DSP now: it polls the host's get_bpm()
+ * (internal transport → live MIDI clock → last clock → current Set tempo →
+ * settings → 120), so it works with no clock running and without MIDI sync
+ * enabled. The UI just mirrors whatever the DSP settled on, because
+ * bpmSyncedRate() and the header both need an accurate figure.
+ *
+ * Sending an explicit 'bpm' (tap tempo / tempo knob) tells the DSP to stop
+ * following; 'bpm_follow_host' re-arms it. */
+let lastHostBpm = 0;
+const HOST_BPM_POLL_TICKS = 30;
+let hostBpmPollCounter = 0;
+
+function syncHostBpm(force) {
+    const raw = getParam('bpm');
+    const v = parseFloat(raw);
+    if (!(v >= 20 && v <= 300)) return;
+    if (!force && Math.abs(v - bpm) < 0.05) return;
+    lastHostBpm = v;
+    bpm = Math.round(v * 10) / 10;
+}
+
 /* Audio source */
 let audioSource = 1; /* Always Move Mix */
 
@@ -427,6 +448,24 @@ function refreshAllPadLEDs() {
     for (let i = 0; i < NUM_SLOTS; i++) {
         setLED(PAD_NOTES[i], getPadColor(i));
     }
+}
+
+/* Turn off every LED this module owns. Must run before host_exit_module():
+ * the host's C-side snapshot restore does not reliably repaint surfaces an
+ * overtake module lit, so each module blacks out its own (dAVEBOx and
+ * song-mode do the same on their exit paths).
+ *
+ * force=true on every write is required — setLED/setButtonLED are cache-guarded
+ * and would silently skip any surface the cache already believes is off. The
+ * cache is module-scope in the shared helper and survives across sessions, so
+ * without force the second visit clears nothing. */
+function clearAllModuleLEDs() {
+    for (let i = 0; i < NUM_SLOTS; i++) setLED(PAD_NOTES[i], Black, true);
+    for (let i = 0; i < 16; i++) setLED(MoveSteps[i], Black, true);
+    for (let i = 0; i < 4; i++) setButtonLED(TRACK_CCS[i], WhiteLedOff, true);
+    setButtonLED(MoveUndo, WhiteLedOff, true);
+    setButtonLED(MoveBack, WhiteLedOff, true);
+    setButtonLED(MoveShift, WhiteLedOff, true);
 }
 
 /* ================================================================
@@ -869,8 +908,12 @@ function syncFxState() {
 globalThis.init = function() {
     console.log('Performance FX v2 module initializing');
 
-    /* State persistence disabled — always start fresh */
-    sendParam('bpm', String(bpm));
+    /* State persistence disabled — always start fresh.
+     * Deliberately no sendParam('bpm', ...) here: that would immediately tell
+     * the DSP a tempo was chosen manually and kill host-tempo follow. */
+    lastHostBpm = 0;
+    hostBpmPollCounter = 0;
+    sendParam('bpm_follow_host', '1');
     sendParam('audio_source', '1');
     for (let i = 0; i < NUM_GLOBALS; i++) {
         if (GLOBAL_KEYS[i] === 'rpt_toggle') continue;
@@ -881,6 +924,13 @@ globalThis.init = function() {
     ledInitIndex = 0;
 };
 
+/* Called by the host at the top of exitOvertakeMode(), before the LED queue is
+ * torn down. Covers exits this module did not initiate — the Tools shortcut and
+ * the overtake menu both leave without routing through our Back handler. */
+globalThis.onUnload = function() {
+    clearAllModuleLEDs();
+};
+
 globalThis.tick = function() {
     if (ledInitPending) {
         setupLedBatch();
@@ -889,6 +939,13 @@ globalThis.tick = function() {
 
     /* Drain queued params (pressure, knob values, etc.) */
     drainParamQueue();
+
+    /* Follow the project tempo (cheap poll — the host updates it as clock
+     * arrives, and syncHostBpm() no-ops unless the value actually moved). */
+    if (++hostBpmPollCounter >= HOST_BPM_POLL_TICKS) {
+        hostBpmPollCounter = 0;
+        syncHostBpm(false);
+    }
 
     /* Autosave */
     autosaveCounter++;
@@ -1001,6 +1058,7 @@ globalThis.onMidiMessageInternal = function(data) {
                 sendParam(`punch_${i}_latch`, '0');
             }
             sendParam('bypass', '1');
+            clearAllModuleLEDs();
             host_exit_module();
             return;
         }
@@ -1043,7 +1101,7 @@ globalThis.onMidiMessageInternal = function(data) {
             if (shiftHeld) {
                 /* Shift+Turn = BPM fine */
                 bpm = Math.max(20, Math.min(300, bpm + delta * 0.5));
-                sendParam('bpm', bpm.toFixed(1));
+                    sendParam('bpm', bpm.toFixed(1));
                 showOverlay('Tempo', `${bpm.toFixed(1)} BPM`, (bpm / 300).toFixed(2));
             } else {
                 /* Turn = scroll through active/latched FX */
