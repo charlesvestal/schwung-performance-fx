@@ -15,6 +15,7 @@
         "midi_in": true,
         "midi_out": false,
         "aftertouch": true,
-        "claims_master_knob": false
+        "claims_master_knob": false,
+        "end_of_chain": true
     }
 }
