@@ -16,6 +16,7 @@
         "midi_out": false,
         "aftertouch": true,
         "claims_master_knob": false,
-        "end_of_chain": true
+        "end_of_chain": true,
+        "suspend_keeps_js": true
     }
 }
