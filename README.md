@@ -90,16 +90,58 @@ Live punch-in audio effects processor for [Move Everything](https://github.com/c
 | E1 | Repeat Length |
 | E2 | Repeat Speed |
 | E3 | Repeat Loop on/off |
-| E4-E6 | Per-FX params (last touched pad); E6 is always the wet amount |
+| E4-E6 | Per-FX params for the last touched pad (see below) |
 | E7 | Tilt EQ |
 | E8 | DJ Filter |
+| Shift+E8 | Global Dry/Wet |
+
+Touch any knob to see its current value. Tap a latched pad to select it for
+E4-E6 editing without unlatching. The display always shows the selected pad's
+own three labels, read from the DSP, so what you see is what that effect
+actually implements.
+
+#### Per-FX Parameters (E4 / E5 / E6)
+
+Knobs set the base value and pressure moves it either side of that, so a knob
+never takes expression away from the pad.
+
+| Effect | E4 | E5 | E6 |
+|--------|----|----|-----|
+| RPT 1/4 – RPT TRP | Filter | Gate | Decay |
+| STUTTER | Filter | Gate | Decay |
+| SCATTER | Pattern | Gate | Reverse |
+| REVERSE | Length | Filter | Decay |
+| STRETCH | Speed | Filter | — |
+| LP SWP / HP SWP | Speed | Reso | Depth |
+| BP RISE / BP FALL | Speed | Reso | Depth |
+| RESO SW | Speed | Reso | Mix |
+| PHASER | Depth | Feedback | Mix |
+| FLANGER | Depth | Feedback | Mix |
+| AUTOFLT | Depth | Reso | Center |
+| DLY 1/4 / DLY D8 | Feedback | Tone | Level |
+| PP 1/4 / PP D8 | Feedback | Tone | Level |
+| ROOM / HALL / DK VERB / SPRING | Decay | Tone | Level |
+| CRUSH | Bits | Tone | Mix |
+| DWNSMPL | Rate | Tone | Mix |
+| SATURATE | Drive | Tone | Mix |
+| GATE | Rate | Duty | Depth |
+| TREMOLO | Rate | Depth | Shape |
+| OCT DN | Pitch | Tone | Mix |
+| VINYL | Noise | Warmth | Mix |
+| VNL BRK | Rate | Noise | Tone |
+
+A wet control (Mix, or Level on the sends) only appears where blending against
+the dry signal is a real technique. Effects that move audio in time get
+something more useful instead — their wet signal is a delayed copy of the dry,
+so mixing the two comb-filters rather than blends. SCATTER's Pattern selects one
+of five slice orders: Shuffle, Stutter, Interleave, Scramble, Retrograde.
 
 ### Controls
 
 | Control | Function |
 |---------|----------|
 | Pads | Hold = FX on, release = off |
-| Pressure | Modulates FX depth per-effect |
+| Pressure | Modulates the selected parameter around its knob position |
 | Shift+Pad | Latch/unlatch FX |
 | Undo (tap) | Bypass toggle |
 | Undo (hold) | Momentary bypass |
