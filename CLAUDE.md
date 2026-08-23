@@ -4,7 +4,9 @@ Instructions for Claude Code when working with this repository.
 
 ## Project Overview
 
-Performance FX is a live audio effects processor overtake module for [Move Anything](https://github.com/charlesvestal/move-everything) on Ableton Move hardware. It provides 32 pressure-sensitive punch-in audio effects with latching, scene snapshots, and a step FX sequencer.
+Performance FX is a live audio effects processor overtake module for [Move Anything](https://github.com/charlesvestal/move-everything) on Ableton Move hardware. It provides 32 pressure-sensitive punch-in audio effects with latching and three
+knobs per effect. (There are no scenes and no step sequencer — earlier versions
+of this file and of `module.json` claimed both; neither was ever built.)
 
 Accessed via the Overtake Modules menu (Shift+Vol+Jog Click).
 
@@ -13,7 +15,7 @@ Accessed via the Overtake Modules menu (Shift+Vol+Jog Click).
 ```
 src/
   module.json           # Module metadata (tool, API v2)
-  ui.js                 # JavaScript UI (pads, knobs, scenes, display)
+  ui.js                 # JavaScript UI (pads, knobs, display)
   help.json             # On-device help text
   dsp/
     perf_fx_dsp.h       # DSP engine types and API
@@ -30,16 +32,52 @@ scripts/
 
 ### Vendored Headers
 
-Two headers are vendored from `move-anything/src/host/`:
+One header is vendored from `move-anything/src/host/`:
 
 - **`plugin_api_v1.h`** — Host/plugin ABI. Defines `host_api_v1_t`, `plugin_api_v2_t`. Source of truth: `move-anything/src/host/plugin_api_v1.h`
-- **`pfx_track_shm.h`** — Shared memory layout for per-track Link Audio audio. Source of truth: `move-anything/src/host/pfx_track_shm.h`
 
-These are stable ABI contracts. If the host changes them, both repos must be updated.
+This is a stable ABI contract. If the host changes it, both repos must be updated.
+
+`pfx_track_shm.h` used to be vendored here too, for a per-track Link Audio input
+mode. Nothing selected that mode after tracks mode was removed from the UI, but
+the wrapper still mapped the shared memory and copied four buffers per block for
+data no code read. Both the header and the path are gone.
+
+### Parameters: one source of truth
+
+`pfx_fx_desc[]` in `perf_fx_dsp.c` is the only place FX names, param names,
+param defaults and signal topology are defined. `perf_fx_plugin.c` exports it
+(`fx_names`, `fx_params_<slot>`) and `ui.js` reads it.
+
+Do not add a label table anywhere else. There used to be three — one per file —
+and they disagreed: the UI advertised 91 knobs of which 72 controlled nothing,
+and 4 more moved a different parameter than the label claimed.
+
+**A wet control is earned, not automatic.** `wet_param` in the descriptor names
+the index of the wet amount, or -1 for none, and `apply_wet()` is the single
+place it is applied — insert FX crossfade dry against wet, sends scale only what
+they added so the dry always survives. Individual effects must not carry their
+own dry/wet blend.
+
+Sixteen slots have one; sixteen do not. It belongs on sends and on effects used
+in parallel (saturation, bitcrush, octave down, vinyl, phaser, flanger, resonant
+peak). It does not belong on anything that moves audio in time — repeats,
+stutter, scatter, reverse, timestretch, vinyl brake — because the wet signal
+there is a delayed copy of the dry and blending them comb-filters. Nor where it
+would duplicate an existing knob: Mix on a tremolo is just its Depth again.
+Those slots spend the knob on something real (Decay, Depth, Center, Shape), and
+one, Timestretch, honestly declares its third param unused rather than carrying
+filler.
+
+`test_params_are_live()` renders every declared param at 0.0 and at 1.0 and
+fails if the audio is identical, so a name with nothing behind it cannot ship.
 
 ### DSP Engine
 
 All 32 effects are implemented in C with Bungee (C++ time-stretch library) for the stretch FX:
+
+Every effect has three knobs (E4-E6) on top of its pressure response, with E6
+always the wet amount. See `pfx_fx_desc[]` for the exact per-slot assignment.
 
 **Row 4 — Time/Repeat**: RPT 1/4, RPT 1/8, RPT 1/16, RPT Triplet, Stutter, Scatter, Reverse, Stretch
 **Row 3 — Filter Sweeps**: LP Sweep, HP Sweep, BP Rise, BP Fall, Reso Sweep, Phaser, Flanger, AutoFilter
@@ -64,24 +102,31 @@ All FX are punch-in (hold=on, release=off) with pressure sensitivity and Shift+h
 ./scripts/install.sh    # Deploy to Move
 ```
 
-The build compiles `perf_fx_plugin.c` and `perf_fx_dsp.c` together into `dsp.so`, linked with `-lm -lrt` (math + POSIX shared memory).
+The build compiles `perf_fx_plugin.c` and `perf_fx_dsp.c` together into `dsp.so`, linked with `-lm`. It links with `g++` because Bungee is C++, so the module needs `libstdc++` and `libgcc_s` on the device (both present). `-lrt` was dropped along with the Link Audio shared-memory path.
 
 ### Running Tests Locally
 
 ```bash
-cc -o test_pfx src/dsp/test_perf_fx.c src/dsp/perf_fx_dsp.c -Isrc/dsp -lm && ./test_pfx
+cc -o test_pfx src/dsp/test_perf_fx.c src/dsp/perf_fx_dsp.c \
+   src/dsp/pfx_bungee_stub.c -Isrc/dsp -lm && ./test_pfx
 ```
+
+`pfx_bungee_stub.c` is required: the real stretcher is C++ and pulls in Bungee
+and pffft, which do not link into a plain `cc` host binary. Without it the
+command in this file simply failed to link, which is why a suite that had been
+red for several commits went unnoticed.
 
 ## Code Style
 
 - **C**: Snake_case. Prefix engine functions with `pfx_`. Log with `pfx:` prefix.
 - **JavaScript**: Follows Move Anything module conventions. Host functions are `snake_case`.
-- **Parameters**: Keys are `snake_case` (e.g., `cont_5_param_2`, `track_mask`, `dry_wet`).
+- **Parameters**: Keys are `snake_case` (e.g. `punch_5_param_2`, `dry_wet`).
 
 ## Key Design Decisions
 
 - **All punch-in**: Every FX is hold=on, release=off for live performance feel
-- **Pressure curves**: Linear, exponential, and switch modes for punch-in intensity mapping
+- **Knob sets base, pressure modulates**: `pfx_mod()` centres pressure on the
+  knob position, so adding knobs took no expression away from the pads
 - **Immediate rate changes**: Repeat rate knob takes effect immediately (no waiting for loop quantum)
 - **No state persistence**: Always starts fresh — removed to simplify
 

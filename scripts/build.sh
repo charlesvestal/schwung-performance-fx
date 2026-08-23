@@ -105,7 +105,7 @@ ${CROSS_PREFIX}g++ -shared -o build/dsp.so \
     build/perf_fx_dsp.o \
     build/pfx_bungee.o \
     build/bungee/libbungee.a \
-    -lm -lrt
+    -lm
 
 # Copy files to dist (use cat to avoid ExtFS deallocation issues with Docker)
 echo "Packaging..."

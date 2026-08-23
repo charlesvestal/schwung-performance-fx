@@ -41,6 +41,17 @@ static inline float pressure_relative(float pressure, float initial,
     return 0.5f * pressure / lo;
 }
 
+/* Knob-plus-pressure, the standard pairing for every parameter that both a
+ * knob and the pad can reach: the knob sets the base value, pressure pushes it
+ * up or down by at most `range`/2 around that base. `pr` is the 0..1 value from
+ * pressure_relative(), so a neutral finger leaves the knob position untouched.
+ *
+ * Doing it this way means adding a knob never steals expression from the pad,
+ * which is why the pressure-only parameters could be given knobs at all. */
+static inline float pfx_mod(float base, float pr, float range) {
+    return pfx_clampf(base + (pr - 0.5f) * range, 0.0f, 1.0f);
+}
+
 #define PFX_SAMPLE_RATE     44100
 #define PFX_BLOCK_SIZE      128
 #define PFX_MAX_DELAY       (PFX_SAMPLE_RATE * 4)   /* 4 seconds */
@@ -48,16 +59,14 @@ static inline float pressure_relative(float pressure, float initial,
 #define PFX_CAPTURE_BUF     (PFX_SAMPLE_RATE * 4)   /* 4 seconds shared capture */
 #define PFX_CHORUS_BUF      (PFX_SAMPLE_RATE * 1)   /* 1 second for chorus/flanger */
 #define PFX_NUM_FX          32
-#define PFX_SLOT_PARAMS     3   /* params per FX slot (E1-E3) */
-#define PFX_NUM_GLOBALS     5   /* global params: DJ Filter, Lo EQ, Hi EQ, Exciter, D/W */
+#define PFX_SLOT_PARAMS     3   /* params per FX slot, mapped to E4-E6 */
 #define PFX_NUM_ALLPASS     6   /* phaser stages */
 
-/* ---- Pressure curve modes ---- */
-enum {
-    PRESSURE_LINEAR = 0,
-    PRESSURE_EXPONENTIAL,
-    PRESSURE_SWITCH
-};
+/* Param index 2 is the wet amount on every slot, without exception — see
+ * pfx_fx_desc_t below. Slot params are E4-E6; the engine-level knobs are
+ * repeat_rate (E1), repeat_speed (E2), tilt_eq (E7), dj_filter (E8) and
+ * dry_wet (Shift+E8). */
+#define PFX_PARAM_MIX       2
 
 /* ---- Unified FX types (32 total) ---- */
 enum {
@@ -69,7 +78,7 @@ enum {
     FX_STUTTER,
     FX_SCATTER,
     FX_REVERSE,
-    FX_HALF_SPEED,
+    FX_STRETCH,
 
     /* Row 3: Filter Sweeps (pads 84-91 -> slots 8-15) */
     FX_LP_SWEEP_DOWN,
@@ -99,14 +108,70 @@ enum {
     FX_TREMOLO,
     FX_PITCH_DOWN,
     FX_VINYL_SIM,
-    FX_TAPE_STOP
+    FX_VINYL_BRAKE
 };
 
 /* ---- FX category helpers ---- */
-#define FX_IS_REPEAT(s)  ((s) >= FX_RPT_1_4 && (s) <= FX_HALF_SPEED)
+#define FX_IS_REPEAT(s)  ((s) >= FX_RPT_1_4 && (s) <= FX_STRETCH)
 #define FX_IS_FILTER(s)  ((s) >= FX_LP_SWEEP_DOWN && (s) <= FX_AUTO_FILTER)
 #define FX_IS_SPACE(s)   ((s) >= FX_DELAY && (s) <= FX_SPRING)
-#define FX_IS_DISTORT(s) ((s) >= FX_BITCRUSH && (s) <= FX_TAPE_STOP)
+#define FX_IS_DISTORT(s) ((s) >= FX_BITCRUSH && (s) <= FX_VINYL_BRAKE)
+
+/* ---- FX descriptor: the single source of truth ----
+ *
+ * Names, defaults and signal topology for every slot live here and nowhere
+ * else. perf_fx_plugin.c exports this table to the UI (fx_names,
+ * fx_params_<slot>) rather than keeping its own copy, and ui.js reads it
+ * rather than keeping a third. Three tables that disagreed is exactly how
+ * 72 of 91 advertised knobs ended up controlling nothing.
+ *
+ * If you add a param to a process_* function, name it here in the same commit.
+ * test_params_are_live() renders every declared param at 0.0 and at 1.0 and
+ * fails if the audio does not change, so a name with no implementation behind
+ * it cannot reach a release.
+ */
+enum {
+    /* Output replaces input: mix crossfades dry against wet. */
+    PFX_TOPO_INSERT = 0,
+    /* Output is added to input (delays, reverbs): mix scales the added wet
+     * so the dry signal always survives — a delay throw at full wet is still
+     * dry + delay, not delay alone. */
+    PFX_TOPO_SEND
+};
+
+typedef struct {
+    const char *name;   /* NULL = this knob is unused for this FX */
+    float def;          /* value at init, chosen to preserve the sound the
+                         * effect had before the knob existed */
+} pfx_param_desc_t;
+
+typedef struct {
+    const char *name;        /* long name, e.g. "Ping Pong 1/4" */
+    const char *short_name;  /* <= 7 chars, fits the 128px display */
+    int topology;            /* PFX_TOPO_INSERT | PFX_TOPO_SEND */
+    pfx_param_desc_t params[PFX_SLOT_PARAMS];
+    /* Index of the wet control, or -1 for none (the effect always runs full
+     * wet and every param is an ordinary one).
+     *
+     * A wet control is earned, not automatic. It belongs on an effect where
+     * blending against the dry signal is a real technique:
+     *
+     *   - sends (delays, reverbs) — always, the dry must survive
+     *   - parallel processing (saturation, bitcrush, octave down, vinyl)
+     *   - classic depth controls (phaser, flanger, resonant peak)
+     *
+     * It does NOT belong on anything that moves audio in time — repeats,
+     * stutter, scatter, reverse, timestretch, vinyl brake. The wet signal
+     * there is a delayed copy of the dry, so "mixing" them comb-filters rather
+     * than blends. Nor does it belong where it would duplicate a knob the
+     * effect already has: Mix on a tremolo is just its Depth again.
+     *
+     * Those slots spend the knob on something real instead. Prefer an honest
+     * NULL over a filler control if nothing real is left. */
+    int wet_param;
+} pfx_fx_desc_t;
+
+extern const pfx_fx_desc_t pfx_fx_desc[PFX_NUM_FX];
 
 /* ---- State Variable Filter ---- */
 typedef struct {
@@ -139,6 +204,11 @@ typedef struct {
     int frames_captured;
     int xfade_pos;     /* crossfade position (0 = not fading) */
     int xfade_len;     /* crossfade length in samples */
+    int bar_start;     /* Scatter: latched read base for the current 8-step
+                        * cycle. Recomputed only at step 0, so the whole
+                        * pattern rearranges one fixed bar. */
+    float decay_gain;  /* Running level for the Decay knob, multiplied down at
+                        * each loop wrap. 1.0 = untouched. */
 } repeat_t;
 
 /* ---- Tape stop / vinyl brake ---- */
@@ -151,16 +221,6 @@ typedef struct {
     float speed;      /* 1.0 = normal, 0.0 = stopped */
     float decel_rate; /* speed decrease per sample */
 } tape_stop_t;
-
-/* ---- Compressor ---- */
-typedef struct {
-    float env;        /* envelope follower */
-    float threshold;
-    float ratio;
-    float attack;     /* coefficient */
-    float release;    /* coefficient */
-    float makeup;
-} compressor_t;
 
 /* ---- Allpass for phaser ---- */
 typedef struct {
@@ -239,14 +299,6 @@ typedef struct {
     svf_t sat_filter_r;
 } pfx_slot_t;
 
-/* ---- Audio source modes ---- */
-enum {
-    SOURCE_LINE_IN = 0,      /* Line-in / mic */
-    SOURCE_MOVE_MIX,         /* Move's mixed audio output */
-    SOURCE_TRACKS            /* Per-track from Link Audio */
-};
-#define PFX_TRACK_COUNT 4
-
 /* ---- Tail silence threshold ---- */
 #define PFX_TAIL_THRESHOLD  0.001f
 #define PFX_TAIL_SILENCE_FRAMES 1000
@@ -270,18 +322,6 @@ typedef struct {
 
     /* Tempo */
     float bpm;
-    int transport_running;
-
-    /* Pressure curve */
-    int pressure_curve;
-
-    /* Audio source */
-    int audio_source;
-    int track_mask;
-
-    /* Per-track audio from Link Audio */
-    int16_t *track_audio[4];
-    int track_audio_valid;
 
     /* Bypass */
     int bypassed;
@@ -319,17 +359,10 @@ typedef struct {
     /* Direct input: if non-NULL, render reads from this instead of mapped_memory */
     int16_t *direct_input;
 
-    /* Log callback (set by plugin wrapper) */
-    void (*log_fn)(const char *msg);
-
     /* Vinyl crackle sample (loaded from WAV file) */
     int16_t *vinyl_crackle_buf;
     int vinyl_crackle_len;       /* total samples */
     int vinyl_crackle_pos;       /* playback position */
-
-    /* Diagnostic: dump first N samples after activation for debugging */
-    int diag_dump_countdown;     /* frames left to dump after activation */
-    int diag_slot;               /* which slot triggered the dump */
 
 } perf_fx_engine_t;
 
@@ -353,7 +386,6 @@ void pfx_set_latched(perf_fx_engine_t *e, int slot, int latched);
 int pfx_serialize_state(perf_fx_engine_t *e, char *buf, int buf_len);
 
 /* DSP helpers */
-float pfx_apply_pressure_curve(float pressure, float velocity, int curve);
 int pfx_bpm_to_samples(float bpm, float division);
 
 #endif /* PERF_FX_DSP_H */

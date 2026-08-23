@@ -1,9 +1,10 @@
 /*
  * Performance FX DSP Unit Tests (v2)
  *
- * Compile and run on host (macOS/Linux):
- *   gcc -o test_perf_fx src/dsp/test_perf_fx.c src/dsp/perf_fx_dsp.c -lm -I src/dsp
- *   ./test_perf_fx
+ * Compile and run on host (macOS/Linux). pfx_bungee_stub.c stands in for the
+ * C++ Bungee stretcher, which does not build into a plain `cc` host binary:
+ *   cc -o test_pfx src/dsp/test_perf_fx.c src/dsp/perf_fx_dsp.c \
+ *      src/dsp/pfx_bungee_stub.c -Isrc/dsp -lm && ./test_pfx
  */
 
 #include <stdio.h>
@@ -108,34 +109,6 @@ static void test_engine_reset(void) {
     PASS();
 }
 
-static void test_pressure_curve_linear(void) {
-    TEST("Pressure curve: linear");
-    float result = pfx_apply_pressure_curve(0.5f, 0.5f, PRESSURE_LINEAR);
-    ASSERT_NEAR(result, 0.625f, 0.01f, "linear midpoint");
-    float zero = pfx_apply_pressure_curve(0.0f, 1.0f, PRESSURE_LINEAR);
-    ASSERT_NEAR(zero, 0.5f, 0.01f, "zero pressure, full velocity");
-    PASS();
-}
-
-static void test_pressure_curve_exponential(void) {
-    TEST("Pressure curve: exponential");
-    float result = pfx_apply_pressure_curve(0.5f, 1.0f, PRESSURE_EXPONENTIAL);
-    ASSERT_TRUE(result > 0.0f && result < 1.0f, "exponential in range");
-    /* exponential squares the pressure, so at p=0.5 mod=0.25 */
-    /* base*0.5 + mod*0.5 + base*mod*0.5 = 0.5 + 0.125 + 0.125 = 0.75 */
-    ASSERT_NEAR(result, 0.75f, 0.01f, "exponential value at p=0.5 v=1.0");
-    PASS();
-}
-
-static void test_pressure_curve_switch(void) {
-    TEST("Pressure curve: switch");
-    float low = pfx_apply_pressure_curve(0.2f, 1.0f, PRESSURE_SWITCH);
-    ASSERT_NEAR(low, 0.5f, 0.01f, "switch below threshold");
-    float high = pfx_apply_pressure_curve(0.7f, 1.0f, PRESSURE_SWITCH);
-    ASSERT_NEAR(high, 1.0f, 0.01f, "switch above threshold");
-    PASS();
-}
-
 static void test_bpm_to_samples(void) {
     TEST("BPM to samples conversion");
     int samples = pfx_bpm_to_samples(120.0f, 1.0f);
@@ -160,7 +133,12 @@ static void test_activate_repeat(void) {
 
     pfx_activate(&e, FX_RPT_1_4, 0.8f);
     ASSERT_EQ_INT(e.slots[FX_RPT_1_4].active, 1, "repeat active");
-    ASSERT_NEAR(e.slots[FX_RPT_1_4].velocity, 0.8f, 0.01f, "velocity");
+    /* Note-on velocity is NOT the pressure centre. Activation parks velocity at
+     * neutral and arms settling (-1); the centre is captured from the first
+     * aftertouch instead, because note-on velocity and pad pressure are not on
+     * the same scale on this hardware. */
+    ASSERT_NEAR(e.slots[FX_RPT_1_4].velocity, 0.5f, 0.01f, "velocity parked neutral");
+    ASSERT_EQ_INT(e.slots[FX_RPT_1_4].settle_counter, -1, "settling armed");
     ASSERT_NEAR(e.slots[FX_RPT_1_4].phase, 0.0f, 0.01f, "phase starts 0");
 
     pfx_deactivate(&e, FX_RPT_1_4);
@@ -177,7 +155,7 @@ static void test_activate_filter(void) {
 
     pfx_activate(&e, FX_LP_SWEEP_DOWN, 0.7f);
     ASSERT_EQ_INT(e.slots[FX_LP_SWEEP_DOWN].active, 1, "filter active");
-    ASSERT_NEAR(e.slots[FX_LP_SWEEP_DOWN].velocity, 0.7f, 0.01f, "velocity");
+    ASSERT_NEAR(e.slots[FX_LP_SWEEP_DOWN].velocity, 0.5f, 0.01f, "velocity parked neutral");
 
     pfx_deactivate(&e, FX_LP_SWEEP_DOWN);
     ASSERT_EQ_INT(e.slots[FX_LP_SWEEP_DOWN].fading_out, 1, "filter fading");
@@ -192,7 +170,7 @@ static void test_activate_space(void) {
 
     pfx_activate(&e, FX_DELAY, 0.9f);
     ASSERT_EQ_INT(e.slots[FX_DELAY].active, 1, "delay active");
-    ASSERT_NEAR(e.slots[FX_DELAY].velocity, 0.9f, 0.01f, "velocity");
+    ASSERT_NEAR(e.slots[FX_DELAY].velocity, 0.5f, 0.01f, "velocity parked neutral");
 
     pfx_deactivate(&e, FX_DELAY);
     /* Space FX go to tail mode instead of fade */
@@ -209,7 +187,7 @@ static void test_activate_distort(void) {
 
     pfx_activate(&e, FX_BITCRUSH, 0.6f);
     ASSERT_EQ_INT(e.slots[FX_BITCRUSH].active, 1, "bitcrush active");
-    ASSERT_NEAR(e.slots[FX_BITCRUSH].velocity, 0.6f, 0.01f, "velocity");
+    ASSERT_NEAR(e.slots[FX_BITCRUSH].velocity, 0.5f, 0.01f, "velocity parked neutral");
 
     pfx_deactivate(&e, FX_BITCRUSH);
     ASSERT_EQ_INT(e.slots[FX_BITCRUSH].fading_out, 1, "fading out");
@@ -390,6 +368,179 @@ static void test_set_param(void) {
 }
 
 /* ============================================================
+ * 6b. Params are live: every name in pfx_fx_desc must move the audio.
+ *
+ * This is the test that matters most in this file. Before it existed, 72 of
+ * the 91 knobs the UI advertised controlled nothing at all, and several more
+ * were wired to a different parameter than their label claimed — because the
+ * only param test asserted that pfx_set_param *stored* a value, which it did
+ * faithfully for knobs no effect ever read.
+ *
+ * Renders the same signal twice per parameter, once at 0.0 and once at 1.0,
+ * and requires the two results to differ. A knob named in the descriptor table
+ * with no implementation behind it fails here.
+ * ============================================================ */
+
+/* Render `blocks` of a fixed noise+tone signal through one active slot and
+ * return the sum of absolute output, plus a checksum sensitive to waveform
+ * shape rather than level alone. */
+static double render_slot_signature(int slot, int param_idx, float param_val) {
+    perf_fx_engine_t e = make_engine();
+    e.bpm = 120.0f;
+
+    /* Deterministic input: a tone plus a fixed pseudo-noise bed, so effects
+     * that key off transients or broadband content have something to chew on. */
+    int16_t in[256];
+    unsigned int seed = 22222u;
+    double sig = 0.0;
+
+    pfx_set_param(&e, slot, param_idx, param_val);
+    pfx_activate(&e, slot, 0.7f);
+    /* Land on the neutral pressure centre so the knob, not the pad, is what
+     * differs between the two runs. */
+    pfx_set_pressure(&e, slot, 0.5f);
+    e.slots[slot].settle_counter = 0;
+    e.slots[slot].velocity = 0.5f;
+
+    /* ~2.3 s: long enough for the repeats to finish capturing, the sweeps to
+     * travel, and the reverb tails to build. */
+    for (int b = 0; b < 800; b++) {
+        for (int i = 0; i < 128; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            float noise = (float)(int)seed / 2147483648.0f * 0.25f;
+            float t = (float)(b * 128 + i);
+            float tone = sinf(2.0f * 3.14159265f * 220.0f * t / 44100.0f) * 0.5f;
+            int16_t v = (int16_t)((tone + noise) * 12000.0f);
+            in[i * 2] = v;
+            in[i * 2 + 1] = v;
+        }
+        e.direct_input = in;
+        pfx_engine_render(&e, in, 128);
+        e.direct_input = NULL;
+
+        /* Weight by index so a pure time shift also registers */
+        for (int i = 0; i < 128; i++)
+            sig += (double)in[i * 2] * (1.0 + i * 0.01) + (double)in[i * 2 + 1];
+    }
+
+    pfx_engine_destroy(&e);
+    return sig;
+}
+
+static void test_params_are_live(void) {
+    TEST("Every declared param changes the audio");
+
+    int checked = 0;
+    for (int slot = 0; slot < PFX_NUM_FX; slot++) {
+        for (int p = 0; p < PFX_SLOT_PARAMS; p++) {
+            if (!pfx_fx_desc[slot].params[p].name) continue;   /* declared unused */
+
+            double lo = render_slot_signature(slot, p, 0.0f);
+            double hi = render_slot_signature(slot, p, 1.0f);
+            checked++;
+
+            if (fabs(hi - lo) < 1.0) {
+                char msg[128];
+                snprintf(msg, sizeof(msg),
+                         "%s param %d (\"%s\") does nothing",
+                         pfx_fx_desc[slot].name, p,
+                         pfx_fx_desc[slot].params[p].name);
+                FAIL(msg);
+                return;
+            }
+        }
+    }
+
+    ASSERT_TRUE(checked >= 90, "expected ~96 declared params to check");
+    PASS();
+}
+
+static void test_desc_table_wellformed(void) {
+    TEST("Descriptor table is well formed");
+
+    for (int slot = 0; slot < PFX_NUM_FX; slot++) {
+        const pfx_fx_desc_t *d = &pfx_fx_desc[slot];
+        ASSERT_TRUE(d->name && d->name[0], "every FX has a long name");
+        ASSERT_TRUE(d->short_name && d->short_name[0], "every FX has a short name");
+        /* Active-FX lines fit 21 chars and hold more than one name. */
+        ASSERT_TRUE(strlen(d->short_name) <= 8, "short name fits the display");
+        ASSERT_TRUE(d->topology == PFX_TOPO_INSERT || d->topology == PFX_TOPO_SEND,
+                    "topology is one of the two known kinds");
+        /* A wet control is optional, but where one exists it must be named for
+         * what it is: a send's is a Level, an insert's is a Mix. Anything that
+         * blends by another name (Gate's Depth) declares wet_param = -1 and is
+         * an ordinary parameter. */
+        ASSERT_TRUE(d->wet_param == -1 || d->wet_param == PFX_PARAM_MIX,
+                    "wet control is either absent or at index 2");
+        if (d->wet_param >= 0) {
+            const char *wet = d->params[d->wet_param].name;
+            ASSERT_TRUE(wet != NULL, "wet control is named");
+            if (d->topology == PFX_TOPO_SEND)
+                ASSERT_TRUE(strcmp(wet, "Level") == 0, "send wet control is named Level");
+            else
+                ASSERT_TRUE(strcmp(wet, "Mix") == 0, "insert wet control is named Mix");
+        }
+        /* A send with no level would be unmixable — it only ever adds. */
+        if (d->topology == PFX_TOPO_SEND)
+            ASSERT_EQ_INT(d->wet_param, PFX_PARAM_MIX, "every send has a Level");
+        for (int p = 0; p < PFX_SLOT_PARAMS; p++) {
+            ASSERT_TRUE(d->params[p].def >= 0.0f && d->params[p].def <= 1.0f,
+                        "defaults are normalised");
+            /* Param labels are drawn into 32px columns — about 6 characters. */
+            if (d->params[p].name)
+                ASSERT_TRUE(strlen(d->params[p].name) <= 6,
+                            "param label fits its display column");
+        }
+    }
+    PASS();
+}
+
+/* Punching a pad must never disturb the wet amount.
+ *
+ * The UI re-arms a repeat pad's shaping controls on every press (Filter, Gate)
+ * so each hit starts somewhere predictable. Mix is not one of those: it is a
+ * level set for the performance, and resetting it per press means it can never
+ * be dialled in at all. The engine side of that contract is that activation
+ * leaves params alone entirely. */
+static void test_activate_preserves_params(void) {
+    TEST("Activation never rewrites slot params");
+    perf_fx_engine_t e = make_engine();
+
+    for (int slot = 0; slot < PFX_NUM_FX; slot++) {
+        for (int p = 0; p < PFX_SLOT_PARAMS; p++)
+            pfx_set_param(&e, slot, p, 0.123f + (float)p * 0.1f);
+
+        pfx_activate(&e, slot, 0.8f);
+        pfx_set_pressure(&e, slot, 0.6f);
+        pfx_deactivate(&e, slot);
+        pfx_activate(&e, slot, 0.8f);
+
+        for (int p = 0; p < PFX_SLOT_PARAMS; p++) {
+            ASSERT_NEAR(e.slots[slot].params[p], 0.123f + (float)p * 0.1f,
+                        0.0001f, "param survived activate/deactivate");
+        }
+    }
+
+    pfx_engine_destroy(&e);
+    PASS();
+}
+
+static void test_defaults_come_from_table(void) {
+    TEST("Slot params initialise from the descriptor table");
+    perf_fx_engine_t e = make_engine();
+
+    for (int slot = 0; slot < PFX_NUM_FX; slot++) {
+        for (int p = 0; p < PFX_SLOT_PARAMS; p++) {
+            ASSERT_NEAR(e.slots[slot].params[p], pfx_fx_desc[slot].params[p].def,
+                        0.0001f, "param default matches table");
+        }
+    }
+
+    pfx_engine_destroy(&e);
+    PASS();
+}
+
+/* ============================================================
  * 7. Animated phase: activate filter sweep, render, verify phase > 0
  * ============================================================ */
 
@@ -410,7 +561,6 @@ static void test_animated_phase(void) {
     e.mapped_memory = fake_mem;
     e.audio_out_offset = 256;
     e.audio_in_offset = 2304;
-    e.audio_source = SOURCE_MOVE_MIX;
 
     pfx_activate(&e, FX_LP_SWEEP_DOWN, 0.8f);
     ASSERT_NEAR(e.slots[FX_LP_SWEEP_DOWN].phase, 0.0f, 0.001f, "phase starts at 0");
@@ -472,7 +622,6 @@ static void test_render_bypass(void) {
     e.mapped_memory = fake_mem;
     e.audio_out_offset = 256;
     e.audio_in_offset = 2304;
-    e.audio_source = SOURCE_MOVE_MIX;
     e.bypassed = 1;
 
     int16_t out[256];
@@ -504,7 +653,6 @@ static void test_render_passthrough(void) {
     e.mapped_memory = fake_mem;
     e.audio_out_offset = 256;
     e.audio_in_offset = 2304;
-    e.audio_source = SOURCE_MOVE_MIX;
 
     int16_t out[256];
     pfx_engine_render(&e, out, 128);
@@ -535,7 +683,6 @@ static void test_render_with_active_fx(void) {
     e.mapped_memory = fake_mem;
     e.audio_out_offset = 256;
     e.audio_in_offset = 2304;
-    e.audio_source = SOURCE_MOVE_MIX;
 
     /* Render passthrough first for comparison */
     int16_t out_dry[256];
@@ -660,7 +807,7 @@ static void test_fx_category_macros(void) {
     TEST("FX category macros");
 
     ASSERT_TRUE(FX_IS_REPEAT(FX_RPT_1_4), "RPT_1_4 is repeat");
-    ASSERT_TRUE(FX_IS_REPEAT(FX_HALF_SPEED), "HALF_SPEED is repeat");
+    ASSERT_TRUE(FX_IS_REPEAT(FX_STRETCH), "HALF_SPEED is repeat");
     ASSERT_TRUE(!FX_IS_REPEAT(FX_LP_SWEEP_DOWN), "LP_SWEEP not repeat");
 
     ASSERT_TRUE(FX_IS_FILTER(FX_LP_SWEEP_DOWN), "LP_SWEEP is filter");
@@ -710,9 +857,6 @@ int main(void) {
     test_clampf();
     test_engine_init_destroy();
     test_engine_reset();
-    test_pressure_curve_linear();
-    test_pressure_curve_exponential();
-    test_pressure_curve_switch();
     test_bpm_to_samples();
     test_bpm_to_samples_8th();
     test_fx_category_macros();
@@ -741,6 +885,10 @@ int main(void) {
 
     printf("\nParams:\n");
     test_set_param();
+    test_desc_table_wellformed();
+    test_defaults_come_from_table();
+    test_activate_preserves_params();
+    test_params_are_live();
 
     printf("\nAnimated Phase:\n");
     test_animated_phase();

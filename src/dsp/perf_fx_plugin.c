@@ -14,11 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <math.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include "pfx_track_shm.h"
 
 #define clampf pfx_clampf
 
@@ -30,68 +25,9 @@
 static const host_api_v1_t *g_host = NULL;
 static audio_fx_api_v2_t g_fx_api;
 
-/* FX names for all 32 slots */
-static const char *FX_NAMES[PFX_NUM_FX] = {
-    /* Row 4: Time/Repeat (slots 0-7) */
-    "RPT 1/4", "RPT 1/8", "RPT 1/16", "RPT Trip",
-    "Stutter", "Scatter", "Reverse", "Timestretch",
-    /* Row 3: Filter Sweeps (slots 8-15) */
-    "LP Sweep", "HP Sweep", "BP Rise", "BP Fall",
-    "Reso Sweep", "Phaser", "Flanger", "Auto Filter",
-    /* Row 2: Space Throws (slots 16-23) */
-    "Delay 1/4", "Delay D8", "PingPong 1/4", "PingPong D8",
-    "Room", "Hall", "Dark Verb", "Spring",
-    /* Row 1: Distortion & Rhythm (slots 24-31) */
-    "Bitcrush", "Downsample", "Saturate", "Gate/Duck",
-    "Tremolo", "Octave Down", "Vinyl Sim", "Vinyl Brake"
-};
-
-/* Per-FX param names (4 params each, mapped to E1-E4) */
-static const char *FX_PARAM_NAMES[PFX_NUM_FX][PFX_SLOT_PARAMS] = {
-    /* Row 4: Time/Repeat */
-    {"Speed",  "Filter", "Gate"},           /* RPT 1/4 */
-    {"Speed",  "Filter", "Gate"},           /* RPT 1/8 */
-    {"Speed",  "Filter", "Gate"},           /* RPT 1/16 */
-    {"Speed",  "Filter", "Gate"},           /* RPT Trip */
-    {"Speed",  "Filter", "Gate"},           /* Stutter */
-    {"Pattern", "Gate",  "Revrse"},         /* Scatter */
-    {"Feedbk", "Filter", "Mix"},            /* Reverse */
-    {"Tone",   "WowFlt", "Mix"},            /* Half Speed */
-    /* Row 3: Filter Sweeps */
-    {"Speed",  "Reso",   "Depth"},          /* LP Sweep Down */
-    {"Speed",  "Reso",   "Depth"},          /* HP Sweep Up */
-    {"Speed",  "Reso",   "Width"},          /* BP Rise */
-    {"Speed",  "Reso",   "Width"},          /* BP Fall */
-    {"Speed",  "Reso",   "Mix"},            /* Reso Sweep */
-    {"Depth",  "Feedbk", "Mix"},            /* Phaser */
-    {"Depth",  "Feedbk", "Mix"},            /* Flanger */
-    {"Depth",  "Center", "Reso"},           /* Auto Filter */
-    /* Row 2: Space Throws */
-    {"Feedbk", "Tone",   "Level"},          /* Delay 1/4 */
-    {"Feedbk", "Tone",   "Level"},          /* Delay Dot8 */
-    {"Feedbk", "Tone",   "Level"},          /* Ping Pong */
-    {"Feedbk", "Tone",   "Level"},          /* PP Dot8 */
-    {"Time",   "Tone",   "Level"},          /* Reverb */
-    {"Time",   "Tone",   "Level"},          /* Hall */
-    {"Time",   "Dark",   "Level"},          /* Dark Verb */
-    {"Time",   "Tone",   "Level"},          /* Spring */
-    /* Row 1: Distortion & Rhythm */
-    {"Filter", "Tone",   "Mix"},            /* Bitcrush */
-    {"Filter", "Tone",   "Mix"},            /* Downsample */
-    {"Drive",  "Tone",   "Mix"},            /* Saturate */
-    {"Speed",  "Shape",  "Depth"},          /* Gate/Duck */
-    {"Rate",   "Depth",  "Wave"},           /* Tremolo */
-    {"Tone",   "WowFlt", "Mix"},            /* Octave Down */
-    {"Noise",  "WowFlt", "Tone"},           /* Vinyl Sim */
-    {"Speed",  "Tone",   "Mix"}             /* Tape Stop */
-};
-
 typedef struct {
     perf_fx_engine_t engine;
     char module_dir[256];
-    pfx_track_audio_shm_t *track_shm;
-    uint32_t last_track_seq;
-    int16_t track_bufs[4][PFX_TRACK_SHM_FRAMES * 2];
     /* Follow the host's project tempo until the user sets one explicitly.
      * The host resolves BPM through sampler_get_bpm(): internal transport →
      * live MIDI clock → last clock → current Set tempo → settings → 120, so
@@ -131,9 +67,6 @@ static void *fx_create(const char *module_dir, const char *config_json) {
     inst->follow_host_bpm = 1;
     inst->bpm_poll_countdown = 0;
 
-    /* Wire up log callback so engine can log diagnostics */
-    inst->engine.log_fn = (g_host && g_host->log) ? g_host->log : NULL;
-
     if (g_host) {
         inst->engine.mapped_memory = g_host->mapped_memory;
         inst->engine.audio_out_offset = g_host->audio_out_offset;
@@ -152,31 +85,12 @@ static void *fx_create(const char *module_dir, const char *config_json) {
 
     log_msg("pfx: Performance FX v2 engine initialized (32 unified FX)");
 
-    /* Try to map Link Audio track shared memory */
-    int shm_fd = shm_open(PFX_TRACK_SHM_NAME, O_RDONLY, 0);
-    if (shm_fd >= 0) {
-        inst->track_shm = (pfx_track_audio_shm_t *)mmap(NULL,
-            sizeof(pfx_track_audio_shm_t), PROT_READ, MAP_SHARED, shm_fd, 0);
-        close(shm_fd);
-        if (inst->track_shm == MAP_FAILED) {
-            inst->track_shm = NULL;
-            log_msg("pfx: track shm mmap failed");
-        } else {
-            log_msg("pfx: track shm mapped OK");
-        }
-    } else {
-        inst->track_shm = NULL;
-    }
-
     return inst;
 }
 
 static void fx_destroy(void *instance) {
     pfx_instance_t *inst = (pfx_instance_t *)instance;
     if (!inst) return;
-    if (inst->track_shm) {
-        munmap(inst->track_shm, sizeof(pfx_track_audio_shm_t));
-    }
     pfx_engine_destroy(&inst->engine);
     free(inst);
     log_msg("pfx: engine destroyed");
@@ -187,24 +101,6 @@ static void fx_destroy(void *instance) {
 static void fx_process_block(void *instance, int16_t *audio_inout, int frames) {
     pfx_instance_t *inst = (pfx_instance_t *)instance;
     if (!inst) return;
-
-    /* Copy per-track audio from shm if available (disabled — always Move Mix for now) */
-    if (inst->track_shm) {
-        uint32_t cur_seq = inst->track_shm->sequence;
-        if (cur_seq != inst->last_track_seq) {
-            inst->last_track_seq = cur_seq;
-            int ch = inst->track_shm->channel_count;
-            if (ch > 4) ch = 4;
-            for (int t = 0; t < ch; t++) {
-                memcpy(inst->track_bufs[t], inst->track_shm->audio[t],
-                       frames * 2 * sizeof(int16_t));
-                inst->engine.track_audio[t] = inst->track_bufs[t];
-            }
-        }
-        inst->engine.track_audio_valid = (inst->engine.track_audio[0] != NULL);
-    } else {
-        inst->engine.track_audio_valid = 0;
-    }
 
     /* Track the host's project tempo unless the user has set one. */
     if (inst->follow_host_bpm && g_host && g_host->get_bpm) {
@@ -250,10 +146,6 @@ static void fx_set_param(void *instance, const char *key, const char *val) {
         return;
     }
     if (strcmp(key, "bypass") == 0) { e->bypassed = ival; return; }
-    if (strcmp(key, "pressure_curve") == 0) { e->pressure_curve = ival; return; }
-    if (strcmp(key, "audio_source") == 0) { e->audio_source = ival; return; }
-    if (strcmp(key, "track_mask") == 0) { e->track_mask = ival & 0x0F; return; }
-    if (strcmp(key, "transport_running") == 0) { e->transport_running = ival; return; }
 
     /* Unified punch FX: punch_N_on, punch_N_off, punch_N_pressure,
      * punch_N_param_M, punch_N_latch */
@@ -302,21 +194,17 @@ static int fx_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "repeat_speed") == 0) return snprintf(buf, buf_len, "%.3f", e->repeat_speed);
     if (strcmp(key, "bpm") == 0) return snprintf(buf, buf_len, "%.1f", e->bpm);
     if (strcmp(key, "bypass") == 0) return snprintf(buf, buf_len, "%d", e->bypassed);
-    if (strcmp(key, "pressure_curve") == 0) return snprintf(buf, buf_len, "%d", e->pressure_curve);
-    if (strcmp(key, "audio_source") == 0) return snprintf(buf, buf_len, "%d", e->audio_source);
-    if (strcmp(key, "track_mask") == 0) return snprintf(buf, buf_len, "%d", e->track_mask);
-    if (strcmp(key, "track_audio_available") == 0) {
-        return snprintf(buf, buf_len, "%d", inst->track_shm ? 1 : 0);
-    }
     if (strcmp(key, "last_touched") == 0) {
         return snprintf(buf, buf_len, "%d", e->last_touched_slot);
     }
 
-    /* FX names (all 32) */
+    /* Short FX names for the 128px display (all 32), straight from the
+     * descriptor table so the UI never keeps its own copy. */
     if (strcmp(key, "fx_names") == 0) {
         int n = snprintf(buf, buf_len, "[");
         for (int i = 0; i < PFX_NUM_FX; i++) {
-            SAFE_SNPRINTF(buf, n, buf_len, "%s\"%s\"", i ? "," : "", FX_NAMES[i]);
+            SAFE_SNPRINTF(buf, n, buf_len, "%s\"%s\"", i ? "," : "",
+                          pfx_fx_desc[i].short_name);
         }
         SAFE_SNPRINTF(buf, n, buf_len, "]");
         return n;
@@ -345,14 +233,22 @@ static int fx_get_param(void *instance, const char *key, char *buf, int buf_len)
         return n;
     }
 
-    /* Per-FX param names */
-    if (strncmp(key, "fx_param_names_", 15) == 0) {
-        int slot = atoi(key + 15);
+    /* Per-FX param names and defaults: [["Filter",0.500],...].
+     * A null name means that knob is unused for this FX. The UI fetches this
+     * for the selected slot rather than carrying its own label table — the
+     * three-tables-that-disagree problem is what left most of these knobs
+     * doing nothing while the display insisted otherwise. */
+    if (strncmp(key, "fx_params_", 10) == 0) {
+        int slot = atoi(key + 10);
         if (slot < 0 || slot >= PFX_NUM_FX) return -1;
         int n = snprintf(buf, buf_len, "[");
         for (int i = 0; i < PFX_SLOT_PARAMS; i++) {
-            SAFE_SNPRINTF(buf, n, buf_len, "%s\"%s\"", i ? "," : "",
-                         FX_PARAM_NAMES[slot][i]);
+            const pfx_param_desc_t *p = &pfx_fx_desc[slot].params[i];
+            if (p->name)
+                SAFE_SNPRINTF(buf, n, buf_len, "%s[\"%s\",%.3f]",
+                              i ? "," : "", p->name, p->def);
+            else
+                SAFE_SNPRINTF(buf, n, buf_len, "%s[null,%.3f]", i ? "," : "", p->def);
         }
         SAFE_SNPRINTF(buf, n, buf_len, "]");
         return n;
