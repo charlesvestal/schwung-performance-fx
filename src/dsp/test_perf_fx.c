@@ -58,7 +58,7 @@ static perf_fx_engine_t make_engine(void) {
 }
 
 /* ============================================================
- * 1. Core: pfx_clampf, init/destroy, reset, pressure curves, bpm_to_samples
+ * 1. Core: pfx_clampf, init/destroy, reset, bpm_to_samples
  * ============================================================ */
 
 static void test_clampf(void) {

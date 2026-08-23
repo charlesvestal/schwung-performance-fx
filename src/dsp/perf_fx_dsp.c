@@ -1941,10 +1941,9 @@ static void process_slot(perf_fx_engine_t *e, int slot, float *l, float *r,
     }
 }
 
-/* Wet amount, param index 2 on every slot without exception.
+/* Wet amount, for the sixteen slots that declare one (see wet_param).
  *
- * Implemented once here rather than 32 times inside the effects. That is what
- * makes "E6 is always Mix" true rather than aspirational, and it is why the
+ * Implemented once here rather than inside each effect, which is why the
  * process_* functions above no longer carry hardcoded 0.3/0.7-style blends —
  * those constants moved into the descriptor table as per-slot defaults.
  *

@@ -5,3 +5,8 @@ test_perf_fx
 *.o
 *.so
 .DS_Store
+
+# Editor / tool state
+.serena/
+.claude/
+
