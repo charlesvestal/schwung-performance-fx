@@ -5,7 +5,9 @@
  * Shift+hold = latch, Shift+hold latched = unlatch
  * E1: RPT Length  E2: RPT Speed  E3: RPT on/off
  * E4-E6: per-slot FX params (last touched pad)
- * E7: Tilt EQ  E8: DJ Filter
+ * E7: Tilt EQ  E8: DJ Filter  Shift+E8: Dry/Wet
+ *
+ * FX names and param labels come from the DSP descriptor table, not from here.
  */
 
 import {
@@ -68,67 +70,93 @@ for (let i = 0; i < NUM_SLOTS; i++) {
 /* Track buttons */
 const TRACK_CCS = [MoveRow1, MoveRow2, MoveRow3, MoveRow4];
 
-/* FX Names (32) */
-const FX_NAMES = [
-    /* Row 4: Time/Repeat */
-    'RPT 1/4', 'RPT 1/8', 'RPT 1/16', 'RPT TRP',
-    'STUTTER', 'SCATTER', 'REVERSE', 'STRETCH',
-    /* Row 3: Filter Sweeps */
-    'LP SWP\u2193', 'HP SWP\u2191', 'BP RISE', 'BP FALL',
-    'RESO SW', 'PHASER', 'FLANGER', 'AUTOFLT',
-    /* Row 2: Space Throws */
-    'DLY 1/4', 'DLY D8', 'PP 1/4', 'PP D8',
-    'ROOM', 'HALL', 'DK VERB', 'SPRING',
-    /* Row 1: Distortion/Rhythm */
-    'CRUSH', 'DWNSMPL', 'SATURATE', 'GATE',
-    'TREMOLO', 'OCT DN', 'VINYL', 'VNL BRK'
-];
+/* FX names and per-slot param names/defaults are NOT kept here.
+ *
+ * They are fetched from the DSP's pfx_fx_desc table (fx_names, fx_params_<n>),
+ * which is the only place they are defined. This module used to carry its own
+ * copy of both, the plugin wrapper carried a third, and all three disagreed \u2014
+ * which is how the display came to advertise 91 knobs when only 19 were wired
+ * to anything and 4 of those moved a different parameter than their label
+ * claimed. A label that cannot drift from its implementation is the point. */
+/* Repeat pads re-arm their first two knobs on each press; index 2 is left
+ * alone. Mirrors the split in resetRepeatKnobs below. */
+const PARAM_KEEP_FROM = 2;
 
-/* Per-slot param names (E1-E3, indexed by slot) */
-const SLOT_PARAM_NAMES = [
-    /* Row 4: Time/Repeat (Speed is on E5 global) */
-    ['Filter', 'Gate',   '---'],
-    ['Filter', 'Gate',   '---'],
-    ['Filter', 'Gate',   '---'],
-    ['Filter', 'Gate',   '---'],
-    ['Filter', 'Gate',   '---'],
-    ['Pattern','Gate',   'Revrse'],
-    ['Feedbk', 'Filter', 'Mix'],
-    ['Tone',   'WowFlt', 'Mix'],
-    /* Row 3: Filter Sweeps */
-    ['Speed',  'Reso',   'Depth'],
-    ['Speed',  'Reso',   'Depth'],
-    ['Speed',  'Reso',   'Width'],
-    ['Speed',  'Reso',   'Width'],
-    ['Speed',  'Reso',   'Mix'],
-    ['Depth',  'Feedbk', 'Mix'],
-    ['Depth',  'Feedbk', 'Mix'],
-    ['Depth',  'Center', 'Reso'],
-    /* Row 2: Space Throws */
-    ['Feedbk', 'Tone',   'Level'],
-    ['Feedbk', 'Tone',   'Level'],
-    ['Feedbk', 'Tone',   'Level'],
-    ['Feedbk', 'Tone',   'Level'],
-    ['Time',   'Tone',   'Level'],
-    ['Time',   'Tone',   'Level'],
-    ['Time',   'Dark',   'Level'],
-    ['Time',   'Tone',   'Level'],
-    /* Row 1: Distortion & Rhythm */
-    ['Filter', 'Tone',   'Mix'],
-    ['Filter', 'Tone',   'Mix'],
-    ['Drive',  'Tone',   'Mix'],
-    ['Speed',  'Shape',  'Depth'],
-    ['Rate',   'Depth',  'Wave'],
-    ['Tone',   'WowFlt', 'Mix'],
-    ['Noise',  'WowFlt', 'Tone'],
-    ['Speed',  'Tone',   'Mix']
-];
+let fxNames = null;                 /* string[32], or null until fetched */
+const slotParamInfo = new Array(NUM_SLOTS).fill(null);  /* [[name,default],...] */
 
-/* Global param labels (E4-E8) */
-const GLOBAL_LABELS = ['Length', 'Speed', 'Loop', 'Tilt', 'DJ Flt'];
-const GLOBAL_KEYS = ['repeat_rate', 'repeat_speed', 'rpt_toggle', 'tilt_eq', 'dj_filter'];
-const GLOBAL_DEFAULTS = [0.5, 0.5, 0.0, 0.5, 0.5];
-const NUM_GLOBALS = 5;
+function fxName(slot) {
+    if (fxNames && fxNames[slot]) return fxNames[slot];
+    return `FX ${slot + 1}`;
+}
+
+function fetchFxNames() {
+    try {
+        const raw = getParam('fx_names');
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length === NUM_SLOTS) fxNames = parsed;
+    } catch (e) { /* keep the numeric fallback */ }
+}
+
+/* Param names and defaults for one slot, fetched once and cached. Lazy per
+ * slot rather than all 32 up front: only the selected slot is ever displayed,
+ * and the param mailbox is contended while pads are held.
+ *
+ * paramLabel() runs from drawMainView every frame, so a failed fetch must not
+ * turn into a get_param call per tick — back off and retry occasionally
+ * instead. */
+const SLOT_PARAM_RETRY_TICKS = 30;
+const slotParamRetry = new Array(NUM_SLOTS).fill(0);
+
+function getSlotParams(slot) {
+    if (slot < 0 || slot >= NUM_SLOTS) return null;
+    if (slotParamInfo[slot]) return slotParamInfo[slot];
+    if (slotParamRetry[slot] > 0) { slotParamRetry[slot]--; return null; }
+    try {
+        const raw = getParam(`fx_params_${slot}`);
+        const parsed = raw ? JSON.parse(raw) : null;
+        if (!Array.isArray(parsed) || parsed.length !== 3) {
+            slotParamRetry[slot] = SLOT_PARAM_RETRY_TICKS;
+            return null;
+        }
+        slotParamInfo[slot] = parsed;
+        /* Mirror the DSP's defaults locally. The DSP already initialised them
+         * from the same table, so nothing needs pushing back.
+         *
+         * Only seed when we have nothing: if the fetch was slow and the player
+         * has already turned a knob for this slot, overwriting here would wipe
+         * what they just dialled in. */
+        if (!slotParams[slot]) slotParams[slot] = parsed.map(p => p[1]);
+        return parsed;
+    } catch (e) {
+        slotParamRetry[slot] = SLOT_PARAM_RETRY_TICKS;
+        return null;
+    }
+}
+
+function paramLabel(slot, idx) {
+    const info = getSlotParams(slot);
+    if (!info || !info[idx] || info[idx][0] === null) return '---';
+    return info[idx][0];
+}
+
+/* Current value of one param. Read-only: falls back to the declared default,
+ * then to a neutral, without inventing a row. Anything that writes goes via
+ * handleKnob, which bails on a '---' label and so only proceeds once the
+ * descriptor fetch has succeeded and seeded slotParams[slot]. */
+function paramValue(slot, idx) {
+    const info = getSlotParams(slot);
+    const p = slotParams[slot];
+    if (p) return p[idx];
+    if (info && info[idx]) return info[idx][1];
+    return 0.5;
+}
+
+/* Engine-level knobs: E1, E2, E3 (UI-only latch toggle), E7, E8, Shift+E8 */
+const GLOBAL_KEYS = ['repeat_rate', 'repeat_speed', 'rpt_toggle', 'tilt_eq', 'dj_filter', 'dry_wet'];
+const GLOBAL_DEFAULTS = [0.5, 0.5, 0.0, 0.5, 0.5, 1.0];
+const NUM_GLOBALS = 6;
 
 /* LED color mapping per slot */
 const BRIGHT_COLORS = [];
@@ -166,9 +194,6 @@ for (let i = 0; i < 3; i++) {
     DIM_COLORS.push(Mustard);
 }
 
-/* Persistence paths */
-const STATE_DIR = '/data/UserData/schwung/perf_fx_state';
-
 /* ================================================================
  * State
  * ================================================================ */
@@ -182,23 +207,15 @@ let undoWasBypassed = false;
 let fxActive = new Array(NUM_SLOTS).fill(false);
 let fxLatched = new Array(NUM_SLOTS).fill(false);
 let fxHeld = new Array(NUM_SLOTS).fill(false); /* physically held (finger on pad) */
-/* Per-slot param values (3 per slot, 0.0-1.0)
- * Repeat slots (0-7): filter=center, gate=off, unused
- * All others: 0.5 matches pre-knob behavior */
-let slotParams = [];
-for (let i = 0; i < NUM_SLOTS; i++) {
-    if (i < 8) slotParams.push([0.5, 0.0, 0.5]);  /* repeat: gate off */
-    else slotParams.push([0.5, 0.5, 0.5]);          /* others: neutral */
-}
+/* Per-slot param values, mirrored from the DSP on first touch of each slot
+ * (see getSlotParams). Null until then — the DSP owns the defaults. */
+let slotParams = new Array(NUM_SLOTS).fill(null);
 /* Last touched slot for E1-E3 mapping */
 let lastTouchedSlot = -1;
 /* Last repeat slot used (for step button toggle) */
 let lastRepeatSlot = 0; /* default to RPT 1/4 (slot 0) */
 /* Global param values (0.0-1.0) */
 let globalValues = GLOBAL_DEFAULTS.slice();
-
-/* Track routing */
-let trackRouted = [false, false, false, false];
 
 /* Display overlay */
 let overlayText = '';
@@ -254,113 +271,6 @@ function syncHostBpm(force) {
     if (!force && Math.abs(v - bpm) < 0.05) return;
     lastHostBpm = v;
     bpm = Math.round(v * 10) / 10;
-}
-
-/* Audio source */
-let audioSource = 1; /* Always Move Mix */
-
-/* Persistence */
-let autosaveCounter = 0;
-const AUTOSAVE_INTERVAL = 440;
-let currentSetUUID = '';
-let stateLoaded = false;
-
-/* ================================================================
- * Persistence
- * ================================================================ */
-
-function getStatePath() {
-    if (currentSetUUID) {
-        return `/data/UserData/schwung/set_state/${currentSetUUID}/perf_fx_state.json`;
-    }
-    return `${STATE_DIR}/perf_fx_state.json`;
-}
-
-function saveState() {
-    /* State persistence disabled for now */
-}
-
-function loadState() {
-    try {
-        const path = getStatePath();
-        const raw = host_read_file(path);
-        if (!raw) return false;
-
-        const fullState = JSON.parse(raw);
-        const state = fullState.ui;
-        if (!state || ![2, 3, 4, 5, 6, 7, 8].includes(state.version)) return false;
-
-        if (state.fxLatched) fxLatched = state.fxLatched;
-        if (state.version >= 8) {
-            /* v8: gate defaults to 0, speed detent */
-            if (state.globalValues && state.globalValues.length >= NUM_GLOBALS) {
-                globalValues = state.globalValues.slice(0, NUM_GLOBALS);
-            }
-            if (state.slotParams && state.slotParams.length >= NUM_SLOTS) {
-                slotParams = state.slotParams;
-            }
-            if (state.lastTouchedSlot !== undefined) {
-                lastTouchedSlot = state.lastTouchedSlot;
-            }
-            if (state.lastRepeatSlot !== undefined) {
-                lastRepeatSlot = state.lastRepeatSlot;
-            }
-        } else {
-            /* v2-v7: old rate system, old defaults, or old gate defaults — reset */
-            globalValues = GLOBAL_DEFAULTS.slice();
-        }
-        /* audioSource always 1 (Move Mix), trackRouted unused */
-        if (state.bpm !== undefined) bpm = state.bpm;
-
-        /* Push restored state to DSP */
-        sendParam('bpm', String(bpm));
-        sendParam('audio_source', '1'); /* Always Move Mix */
-
-        /* Restore global params (skip rpt_toggle which is UI-only) */
-        for (let i = 0; i < NUM_GLOBALS; i++) {
-            if (GLOBAL_KEYS[i] === 'rpt_toggle') continue;
-            sendParam(GLOBAL_KEYS[i], globalValues[i].toFixed(3));
-        }
-
-        /* Restore per-slot params */
-        for (let i = 0; i < NUM_SLOTS; i++) {
-            for (let j = 0; j < 3; j++) {
-                sendParam(`punch_${i}_param_${j}`, slotParams[i][j].toFixed(3));
-            }
-        }
-
-        /* Restore latched FX */
-        for (let i = 0; i < NUM_SLOTS; i++) {
-            if (fxLatched[i]) {
-                sendParam(`punch_${i}_on`, '0.700');
-                sendParam(`punch_${i}_latch`, '1');
-                fxActive[i] = true;
-            }
-        }
-
-        /* Restore DSP state if available */
-        if (fullState.dsp) {
-            sendParam('restore_state', fullState.dsp);
-        }
-
-        return true;
-    } catch (e) {
-        return false;
-    }
-}
-
-function detectSetUUID() {
-    try {
-        const raw = host_read_file('/data/UserData/schwung/active_set.txt');
-        if (raw) {
-            const lines = raw.split('\n');
-            if (lines[0] && lines[0].length > 8) {
-                currentSetUUID = lines[0].trim();
-            }
-        }
-    } catch (e) {
-        /* ignore */
-    }
 }
 
 /* ================================================================
@@ -516,7 +426,7 @@ function drawMainView() {
     let activeLine2 = '';
     for (let i = 0; i < NUM_SLOTS; i++) {
         if (fxActive[i] || fxLatched[i]) {
-            const name = FX_NAMES[i];
+            const name = fxName(i);
             const tag = fxLatched[i] ? '*' : '';
             const entry = name + tag;
             if (activeLine1.length === 0) {
@@ -551,15 +461,15 @@ function drawMainView() {
     print(64, 33, rptOn ? 'LP*' : 'Loop', 1);  /* E3: Loop SW */
     /* E4: first per-slot param */
     if (lastTouchedSlot >= 0 && lastTouchedSlot < NUM_SLOTS) {
-        print(96, 33, SLOT_PARAM_NAMES[lastTouchedSlot][0], 1);
+        print(96, 33, paramLabel(lastTouchedSlot, 0), 1);
     } else {
         print(96, 33, '---', 1);
     }
 
     /* Line 5: E5-E8 labels */
     if (lastTouchedSlot >= 0 && lastTouchedSlot < NUM_SLOTS) {
-        print(0, 44, SLOT_PARAM_NAMES[lastTouchedSlot][1], 1);  /* E5 */
-        print(32, 44, SLOT_PARAM_NAMES[lastTouchedSlot][2], 1); /* E6 */
+        print(0, 44, paramLabel(lastTouchedSlot, 1), 1);  /* E5 */
+        print(32, 44, paramLabel(lastTouchedSlot, 2), 1); /* E6 */
     } else {
         print(0, 44, '---', 1);
         print(32, 44, '---', 1);
@@ -604,12 +514,21 @@ function drawOverlay() {
  * Rate label helper (maps 0..1 to musical division name)
  * ================================================================ */
 
+/* Tapping a repeat pad re-arms its shaping controls (Filter bypassed, Gate off)
+ * so each punch-in starts from a predictable place.
+ *
+ * Index 2 is deliberately NOT reset. It is whatever the player dialled in for
+ * the performance — Decay on the repeats, a wet amount elsewhere — not part of
+ * the per-hit shaping. Snapping it back on every press meant it could never be
+ * dialled in at all. */
 function resetRepeatKnobs(slot) {
-    /* Reset filter to center (bypass), gate to off, speed to normal */
-    slotParams[slot][0] = 0.5;  /* filter = center */
-    slotParams[slot][1] = 0.0;  /* gate = off */
-    sendParam(`punch_${slot}_param_0`, '0.500');
-    sendParam(`punch_${slot}_param_1`, '0.000');
+    const info = getSlotParams(slot);
+    if (info && slotParams[slot]) {
+        for (let i = 0; i < PARAM_KEEP_FROM; i++) {
+            slotParams[slot][i] = info[i][1];
+            sendParam(`punch_${slot}_param_${i}`, info[i][1].toFixed(3));
+        }
+    }
     globalValues[1] = 0.5;      /* speed = normal */
     sendParam('repeat_speed', '0.500');
 }
@@ -752,7 +671,7 @@ function handlePadOn(note, velocity) {
             fxActive[slot] = false;
             sendParam(`punch_${slot}_latch`, '0');
             sendParam(`punch_${slot}_off`, '1');
-            showOverlay(FX_NAMES[slot], 'Unlatched', '');
+            showOverlay(fxName(slot), 'Unlatched', '');
         } else {
             /* Latch on */
             fxLatched[slot] = true;
@@ -765,14 +684,14 @@ function handlePadOn(note, velocity) {
             }
             sendParam(`punch_${slot}_on`, velNorm);
             sendParam(`punch_${slot}_latch`, '1');
-            showOverlay(FX_NAMES[slot], 'Latched', '');
+            showOverlay(fxName(slot), 'Latched', '');
         }
     } else {
         /* Normal tap on latched pad = select for knob editing (don't unlatch) */
         if (fxLatched[slot]) {
             lastTouchedSlot = slot;
-            const names = SLOT_PARAM_NAMES[slot];
-            showOverlay(FX_NAMES[slot], `${names[0]} | ${names[1]} | ${names[2]}`, '');
+            showOverlay(fxName(slot),
+                `${paramLabel(slot, 0)} | ${paramLabel(slot, 1)} | ${paramLabel(slot, 2)}`, '');
             refreshPadLED(slot);
             return;
         }
@@ -827,10 +746,6 @@ function handleAftertouch(note, pressure) {
     sendParam(`punch_${slot}_pressure`, (pressure / 127.0).toFixed(3));
 }
 
-function handleStep(stepIdx, pressed) {
-    /* Step buttons unused — reserved for future */
-}
-
 function handleKnob(knobIndex, delta) {
     if (knobIndex === 0) {
         /* E1: RPT Length — free seconds */
@@ -860,14 +775,14 @@ function handleKnob(knobIndex, delta) {
             sendParam(`punch_${slot}_on`, '0.700');
             sendParam(`punch_${slot}_latch`, '1');
             globalValues[2] = 1.0;
-            showOverlay(FX_NAMES[slot], 'Loop ON', '1.00');
+            showOverlay(fxName(slot), 'Loop ON', '1.00');
         } else if (delta < 0 && fxActive[slot]) {
             fxLatched[slot] = false;
             fxActive[slot] = false;
             sendParam(`punch_${slot}_latch`, '0');
             sendParam(`punch_${slot}_off`, '1');
             globalValues[2] = 0.0;
-            showOverlay(FX_NAMES[slot], 'Loop OFF', '0.00');
+            showOverlay(fxName(slot), 'Loop OFF', '0.00');
         }
         refreshPadLED(slot);
     } else if (knobIndex >= 3 && knobIndex <= 5) {
@@ -878,11 +793,15 @@ function handleKnob(knobIndex, delta) {
         }
         const slot = lastTouchedSlot;
         const pi = knobIndex - 3;
-        let v = slotParams[slot][pi] + delta * 0.01;
+        const label = paramLabel(slot, pi);
+        if (label === '---') return;   /* this FX declares no knob here */
+        let v = paramValue(slot, pi) + delta * 0.01;
         v = Math.max(0.0, Math.min(1.0, v));
+        /* Must land locally, or the next turn reads the old value back and the
+         * knob appears to snap. paramValue() guarantees the row exists. */
         slotParams[slot][pi] = v;
         sendParam(`punch_${slot}_param_${pi}`, v.toFixed(3));
-        showOverlay(FX_NAMES[slot], SLOT_PARAM_NAMES[slot][pi], v.toFixed(2));
+        showOverlay(fxName(slot), label, v.toFixed(2));
     } else if (knobIndex === 6) {
         /* E7: Tilt EQ */
         let v = globalValues[3] + delta * 0.01;
@@ -891,6 +810,16 @@ function handleKnob(knobIndex, delta) {
         sendParam('tilt_eq', v.toFixed(3));
         showOverlay('Global', 'Tilt', v.toFixed(2));
     } else if (knobIndex === 7) {
+        if (shiftHeld) {
+            /* Shift+E8: global dry/wet. The DSP has always had this stage;
+             * until now nothing sent the param, so it was stuck at full wet. */
+            let v = globalValues[5] + delta * 0.01;
+            v = Math.max(0.0, Math.min(1.0, v));
+            globalValues[5] = v;
+            sendParam('dry_wet', v.toFixed(3));
+            showOverlay('Global', 'Dry/Wet', v.toFixed(2));
+            return;
+        }
         /* E8: DJ Filter */
         let v = globalValues[4] + delta * 0.01;
         v = Math.max(0.0, Math.min(1.0, v));
@@ -915,14 +844,14 @@ function handleKnobPeek(knobNote) {
     } else if (knobNote === 2) {
         /* E3: RPT on/off */
         const rptActive = fxActive[lastRepeatSlot] || fxLatched[lastRepeatSlot];
-        showOverlay(FX_NAMES[lastRepeatSlot], rptActive ? 'Loop ON' : 'Loop OFF', rptActive ? '1.00' : '0.00');
+        showOverlay(fxName(lastRepeatSlot), rptActive ? 'Loop ON' : 'Loop OFF', rptActive ? '1.00' : '0.00');
     } else if (knobNote >= 3 && knobNote <= 5) {
         /* E4-E6: per-slot params */
         const pi = knobNote - 3;
         if (lastTouchedSlot >= 0 && lastTouchedSlot < NUM_SLOTS) {
             const slot = lastTouchedSlot;
-            showOverlay(FX_NAMES[slot], SLOT_PARAM_NAMES[slot][pi],
-                       slotParams[slot][pi].toFixed(2));
+            showOverlay(fxName(slot), paramLabel(slot, pi),
+                       paramValue(slot, pi).toFixed(2));
         } else {
             showOverlay('No FX', 'Tap a pad first', '');
         }
@@ -930,13 +859,13 @@ function handleKnobPeek(knobNote) {
         /* E7: Tilt EQ */
         showOverlay('Global', 'Tilt', globalValues[3].toFixed(2));
     } else if (knobNote === 7) {
+        if (shiftHeld) {
+            showOverlay('Global', 'Dry/Wet', globalValues[5].toFixed(2));
+            return;
+        }
         /* E8: DJ Filter */
         showOverlay('Global', 'DJ Flt', globalValues[4].toFixed(2));
     }
-}
-
-function handleTrackButton(trackIdx, pressed) {
-    /* Track buttons unused — always Move Mix */
 }
 
 function handleJogScroll(delta) {
@@ -962,7 +891,7 @@ function reconcileWithDsp() {
 
     for (let i = 0; i < NUM_SLOTS; i++) {
         if (active[i] === 1 && !fxActive[i] && !fxLatched[i] && !fxHeld[i]) {
-            console.log(`[pfx] stuck FX repaired: slot ${i} (${FX_NAMES[i]}) — DSP had it on, UI did not`);
+            console.log(`[pfx] stuck FX repaired: slot ${i} (${fxName(i)}) — DSP had it on, UI did not`);
             sendParam(`punch_${i}_off`, '1');
             refreshPadLED(i);
         }
@@ -1005,8 +934,8 @@ globalThis.init = function() {
      * the DSP a tempo was chosen manually and kill host-tempo follow. */
     lastHostBpm = 0;
     hostBpmPollCounter = 0;
+    fetchFxNames();
     sendParam('bpm_follow_host', '1');
-    sendParam('audio_source', '1');
     for (let i = 0; i < NUM_GLOBALS; i++) {
         if (GLOBAL_KEYS[i] === 'rpt_toggle') continue;
         sendParam(GLOBAL_KEYS[i], GLOBAL_DEFAULTS[i].toFixed(3));
@@ -1095,13 +1024,6 @@ globalThis.tick = function() {
         syncHostBpm(false);
     }
 
-    /* Autosave */
-    autosaveCounter++;
-    if (autosaveCounter >= AUTOSAVE_INTERVAL) {
-        autosaveCounter = 0;
-        saveState();
-    }
-
     /* Render display */
     if (overlayTimer > 0) {
         drawOverlay();
@@ -1151,10 +1073,6 @@ globalThis.onMidiMessageInternal = function(data) {
                 handlePadOn(d1, d2);
                 return;
             }
-            if (d1 >= 16 && d1 <= 31) {
-                handleStep(d1 - 16, true);
-                return;
-            }
         } else {
             if (d1 >= 68 && d1 <= 99) {
                 handlePadOff(d1);
@@ -1184,12 +1102,12 @@ globalThis.onMidiMessageInternal = function(data) {
                             /* Already latched: unlatch (will release on pad-off) */
                             fxLatched[i] = false;
                             sendParam(`punch_${i}_latch`, '0');
-                            showOverlay(FX_NAMES[i], 'Unlatched', '');
+                            showOverlay(fxName(i), 'Unlatched', '');
                         } else {
                             /* Not latched: latch it */
                             fxLatched[i] = true;
                             sendParam(`punch_${i}_latch`, '1');
-                            showOverlay(FX_NAMES[i], 'Latched', '');
+                            showOverlay(fxName(i), 'Latched', '');
                         }
                         refreshPadLED(i);
                     }
@@ -1200,7 +1118,6 @@ globalThis.onMidiMessageInternal = function(data) {
 
         /* Back - CLEAN EXIT */
         if (d1 === MoveBack && d2 > 0) {
-            saveState();
             for (let i = 0; i < NUM_SLOTS; i++) {
                 sendParam(`punch_${i}_off`, '1');
                 sendParam(`punch_${i}_latch`, '0');
@@ -1279,13 +1196,6 @@ globalThis.onMidiMessageInternal = function(data) {
 
         /* Master knob - DO NOT intercept CC 79, let it pass through for volume */
 
-        /* Track buttons */
-        for (let i = 0; i < 4; i++) {
-            if (d1 === TRACK_CCS[i]) {
-                handleTrackButton(i, d2 > 0);
-                return;
-            }
-        }
     }
 };
 

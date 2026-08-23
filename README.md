@@ -90,7 +90,7 @@ Live punch-in audio effects processor for [Move Everything](https://github.com/c
 | E1 | Repeat Length |
 | E2 | Repeat Speed |
 | E3 | Repeat Loop on/off |
-| E4-E6 | Per-FX params (last touched pad) |
+| E4-E6 | Per-FX params (last touched pad); E6 is always the wet amount |
 | E7 | Tilt EQ |
 | E8 | DJ Filter |
 

@@ -12,11 +12,79 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
-#include <stdarg.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* ============================================================
+ * FX descriptor table — the single source of truth
+ *
+ * Every default below is the value that reproduces the sound the effect had
+ * before it had a knob, so wiring the knobs up did not change how the module
+ * sounds out of the box. Changing one now is an audible decision.
+ * ============================================================ */
+
+const pfx_fx_desc_t pfx_fx_desc[PFX_NUM_FX] = {
+/*  name           short      topology         param 0           param 1           param 2          wet */
+
+  /* Time/repeat. No wet control on any of them: the loop is a delayed copy of
+   * the input, so blending it back comb-filters instead of mixing. The knob
+   * goes to Decay — successive repetitions falling away — which is what a beat
+   * repeat actually wants. */
+  { "RPT 1/4",     "RPT 1/4", PFX_TOPO_INSERT, {{"Filter",0.5f}, {"Gate",  0.0f}, {"Decay", 0.0f}}, -1 },
+  { "RPT 1/8",     "RPT 1/8", PFX_TOPO_INSERT, {{"Filter",0.5f}, {"Gate",  0.0f}, {"Decay", 0.0f}}, -1 },
+  { "RPT 1/16",    "RPT1/16", PFX_TOPO_INSERT, {{"Filter",0.5f}, {"Gate",  0.0f}, {"Decay", 0.0f}}, -1 },
+  { "RPT Triplet", "RPT TRP", PFX_TOPO_INSERT, {{"Filter",0.5f}, {"Gate",  0.0f}, {"Decay", 0.0f}}, -1 },
+  { "Stutter",     "STUTTER", PFX_TOPO_INSERT, {{"Filter",0.5f}, {"Gate",  0.0f}, {"Decay", 0.0f}}, -1 },
+  { "Scatter",     "SCATTER", PFX_TOPO_INSERT, {{"Pattrn",0.0f}, {"Gate",  0.0f}, {"Revrse",0.5f}}, -1 },
+  { "Reverse",     "REVERSE", PFX_TOPO_INSERT, {{"Length",0.5f}, {"Filter",0.5f}, {"Decay", 0.0f}}, -1 },
+  /* Timestretch has two real controls and no honest third: it is time-domain
+   * so Mix is out, and Bungee exposes nothing else worth a knob. An unused
+   * slot the display marks "---" beats inventing a control that does little. */
+  { "Timestretch", "STRETCH", PFX_TOPO_INSERT, {{"Speed", 0.5f}, {"Filter",0.5f}, {NULL,    0.5f}}, -1 },
+
+  /* Sweeps: Depth is how far the sweep travels. Blending dry back into a
+   * filter sweep just stops it sweeping, so these get Depth, not Mix. */
+  { "LP Sweep",    "LP SWP",  PFX_TOPO_INSERT, {{"Speed", 0.5f}, {"Reso",  0.5f}, {"Depth", 0.5f}}, -1 },
+  { "HP Sweep",    "HP SWP",  PFX_TOPO_INSERT, {{"Speed", 0.5f}, {"Reso",  0.5f}, {"Depth", 0.5f}}, -1 },
+  { "BP Rise",     "BP RISE", PFX_TOPO_INSERT, {{"Speed", 0.5f}, {"Reso",  0.5f}, {"Depth", 0.5f}}, -1 },
+  { "BP Fall",     "BP FALL", PFX_TOPO_INSERT, {{"Speed", 0.5f}, {"Reso",  0.5f}, {"Depth", 0.5f}}, -1 },
+  /* These three do earn a Mix: a resonant peak or a comb over the dry signal
+   * is the classic way all three are used. */
+  { "Reso Sweep",  "RESO SW", PFX_TOPO_INSERT, {{"Speed", 0.5f}, {"Reso",  0.5f}, {"Mix",   0.7f}},  2 },
+  { "Phaser",      "PHASER",  PFX_TOPO_INSERT, {{"Depth", 0.5f}, {"Feedbk",0.5f}, {"Mix",   0.7f}},  2 },
+  { "Flanger",     "FLANGER", PFX_TOPO_INSERT, {{"Depth", 0.5f}, {"Feedbk",0.5f}, {"Mix",   0.6f}},  2 },
+  { "Auto Filter", "AUTOFLT", PFX_TOPO_INSERT, {{"Depth", 0.5f}, {"Reso",  0.5f}, {"Center",0.5f}}, -1 },
+
+  /* Sends. Level is not optional here — it is the send amount, and the dry
+   * signal always survives underneath it. */
+  { "Delay 1/4",   "DLY 1/4", PFX_TOPO_SEND,   {{"Feedbk",0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "Delay D8",    "DLY D8",  PFX_TOPO_SEND,   {{"Feedbk",0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "PingPong 1/4","PP 1/4",  PFX_TOPO_SEND,   {{"Feedbk",0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "PingPong D8", "PP D8",   PFX_TOPO_SEND,   {{"Feedbk",0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "Room",        "ROOM",    PFX_TOPO_SEND,   {{"Decay", 0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "Hall",        "HALL",    PFX_TOPO_SEND,   {{"Decay", 0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "Dark Verb",   "DK VERB", PFX_TOPO_SEND,   {{"Decay", 0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+  { "Spring",      "SPRING",  PFX_TOPO_SEND,   {{"Decay", 0.5f}, {"Tone",  0.5f}, {"Level", 0.5f}},  2 },
+
+  /* Distortion. Parallel processing is standard practice on all of these, so
+   * Mix is real work rather than filler. */
+  { "Bitcrush",    "CRUSH",   PFX_TOPO_INSERT, {{"Bits",  0.5f}, {"Tone",  1.0f}, {"Mix",   1.0f}},  2 },
+  { "Downsample",  "DWNSMPL", PFX_TOPO_INSERT, {{"Rate",  0.5f}, {"Tone",  1.0f}, {"Mix",   1.0f}},  2 },
+  { "Saturate",    "SATURATE",PFX_TOPO_INSERT, {{"Drive", 0.5f}, {"Tone",  0.5f}, {"Mix",   0.7f}},  2 },
+  /* Gate's wet amount IS its depth — how far it ducks — so it is named for
+   * what it does rather than dressed up as a mix. */
+  { "Gate/Duck",   "GATE",    PFX_TOPO_INSERT, {{"Rate",  0.5f}, {"Duty",  0.5f}, {"Depth", 1.0f}}, -1 },
+  /* Same trap avoided: a Mix here would have duplicated Depth. Shape morphs
+   * the LFO from sine to square instead. */
+  { "Tremolo",     "TREMOLO", PFX_TOPO_INSERT, {{"Rate",  0.5f}, {"Depth", 0.5f}, {"Shape", 0.0f}}, -1 },
+  { "Octave Down", "OCT DN",  PFX_TOPO_INSERT, {{"Pitch", 0.5f}, {"Tone",  1.0f}, {"Mix",   1.0f}},  2 },
+  { "Vinyl Sim",   "VINYL",   PFX_TOPO_INSERT, {{"Noise", 0.5f}, {"Warmth",0.5f}, {"Mix",   1.0f}},  2 },
+  /* Time-domain like the repeats — a slowing copy against live audio flams. */
+  { "Vinyl Brake", "VNL BRK", PFX_TOPO_INSERT, {{"Rate",  0.5f}, {"Noise", 0.5f}, {"Tone",  1.0f}}, -1 }
+};
+
 
 /* ============================================================
  * Utility helpers
@@ -28,10 +96,6 @@
     n += snprintf((buf) + (n), (n) < (len) ? (len) - (n) : 0, __VA_ARGS__); \
     if ((n) >= (len)) return (len) - 1; \
 } while(0)
-
-static inline float lerpf(float a, float b, float t) {
-    return a + (b - a) * t;
-}
 
 static inline float soft_clip(float x) {
     if (x > 1.5f) return 1.0f;
@@ -63,16 +127,6 @@ static inline float flush_denormal(float x) {
     return (v.u & 0x7F800000) == 0 ? 0.0f : x;
 }
 
-static void engine_log(perf_fx_engine_t *e, const char *fmt, ...) {
-    if (!e || !e->log_fn) return;
-    char buf[256];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    e->log_fn(buf);
-}
-
 static inline float cutoff_to_f(float cutoff01) {
     float hz = 20.0f * powf(1000.0f, cutoff01);
     if (hz > 20000.0f) hz = 20000.0f;
@@ -80,21 +134,16 @@ static inline float cutoff_to_f(float cutoff01) {
     return clampf(f, 0.0f, 1.0f);
 }
 
-float pfx_apply_pressure_curve(float pressure, float velocity, int curve) {
-    float base = velocity;
-    float mod;
-    switch (curve) {
-        case PRESSURE_EXPONENTIAL:
-            mod = pressure * pressure;
-            break;
-        case PRESSURE_SWITCH:
-            mod = pressure > 0.3f ? 1.0f : 0.0f;
-            break;
-        default:
-            mod = pressure;
-            break;
-    }
-    return clampf(base * 0.5f + mod * 0.5f + base * mod * 0.5f, 0.0f, 1.0f);
+/* Resonance knob -> multiplier for an SVF q coefficient.
+ *
+ * Note the inversion: in this SVF, q is a damping term (hp = in - lp - q*bp),
+ * so *smaller* q means *more* resonance. A Reso knob at 0.5 returns exactly
+ * 1.0, which is what keeps each filter's hand-tuned base q intact at default.
+ * Deliberately branch-and-multiply rather than powf() — this runs per sample
+ * per active slot, and powf() on ARM is far too expensive for that. */
+static inline float pfx_reso_scale(float reso) {
+    if (reso < 0.5f) return 1.0f + (0.5f - reso) * 8.0f;   /* 1.0 -> 5.0 (tamer) */
+    return 1.0f - (reso - 0.5f) * 1.7f;                     /* 1.0 -> 0.15 (sharper) */
 }
 
 /* Map rate knob (0..1) directly to repeat length in samples.
@@ -183,14 +232,6 @@ static void delay_read(delay_t *d, int delay_samples, float *l, float *r) {
     *r = d->buf_r[pos];
 }
 
-static void delay_read_interp(delay_t *d, float delay_samples, float *l, float *r) {
-    int pos0 = (d->write_pos - (int)delay_samples + d->length) % d->length;
-    int pos1 = (pos0 - 1 + d->length) % d->length;
-    float frac = delay_samples - (int)delay_samples;
-    *l = d->buf_l[pos0] + frac * (d->buf_l[pos1] - d->buf_l[pos0]);
-    *r = d->buf_r[pos0] + frac * (d->buf_r[pos1] - d->buf_r[pos0]);
-}
-
 /* ============================================================
  * Repeat buffer helpers
  * ============================================================ */
@@ -234,9 +275,6 @@ void pfx_engine_init(perf_fx_engine_t *e) {
     e->repeat_rate = 0.5f;
     e->repeat_speed = 0.5f;
     e->bpm = 120.0f;
-    e->pressure_curve = PRESSURE_EXPONENTIAL;
-    e->audio_source = SOURCE_MOVE_MIX;
-    e->track_mask = 0x0F;
     e->last_touched_slot = -1;
 
     /* Allocate shared capture buffer */
@@ -258,18 +296,10 @@ void pfx_engine_init(perf_fx_engine_t *e) {
     for (int i = 0; i < PFX_NUM_FX; i++) {
         pfx_slot_t *s = &e->slots[i];
 
-        /* Per-type defaults: must match pre-knob behavior */
-        if (FX_IS_REPEAT(i)) {
-            /* Repeat: filter=center(bypass), gate=off, unused */
-            s->params[0] = 0.5f;
-            s->params[1] = 0.0f;
-            s->params[2] = 0.5f;
-        } else {
-            /* All others: 0.5 was the implicit default before knobs were wired */
-            s->params[0] = 0.5f;
-            s->params[1] = 0.5f;
-            s->params[2] = 0.5f;
-        }
+        /* Param defaults come from the descriptor table, never from a second
+         * list kept in step by hand. */
+        for (int j = 0; j < PFX_SLOT_PARAMS; j++)
+            s->params[j] = pfx_fx_desc[i].params[j].def;
 
         if (FX_IS_REPEAT(i)) {
             /* Repeat slots: repeat buffer */
@@ -299,7 +329,7 @@ void pfx_engine_init(perf_fx_engine_t *e) {
             }
         } else if (FX_IS_DISTORT(i)) {
             /* Distortion slots */
-            if (i == FX_TAPE_STOP) {
+            if (i == FX_VINYL_BRAKE) {
                 s->tape.buf_l = (float *)calloc(PFX_REPEAT_BUF, sizeof(float));
                 s->tape.buf_r = (float *)calloc(PFX_REPEAT_BUF, sizeof(float));
                 s->tape.buf_len = PFX_REPEAT_BUF;
@@ -449,7 +479,38 @@ void pfx_engine_reset(perf_fx_engine_t *e) {
  * Unified FX control
  * ============================================================ */
 
+/* Grab the tail of the capture buffer into the Reverse slot's private buffer
+ * and park the read head at the end, ready to walk backwards.
+ *
+ * params[0] = Length: 0 -> 1/4 bar, 0.5 -> 1 bar (the old fixed behaviour),
+ * 1.0 -> 2 bars. Called both on activation and on every loop wrap, so turning
+ * the knob while it runs takes effect at the next wrap. */
+static void pfx_reverse_recapture(perf_fx_engine_t *e, pfx_slot_t *s) {
+    float k = s->params[0];
+    float bars = (k < 0.5f) ? (0.25f + k * 1.5f) : (1.0f + (k - 0.5f) * 2.0f);
+
+    int len = pfx_bpm_to_samples(e->bpm, 4.0f * bars);
+    if (len > s->repeat.buf_len) len = s->repeat.buf_len;
+    if (len > e->capture_len) len = e->capture_len;
+    if (len < 128) len = 128;
+
+    for (int i = 0; i < len; i++) {
+        int src = (e->capture_write_pos - len + i + e->capture_len) % e->capture_len;
+        s->repeat.buf_l[i] = e->capture_buf_l[src];
+        s->repeat.buf_r[i] = e->capture_buf_r[src];
+    }
+    s->repeat.repeat_len = len;
+    s->repeat.read_pos = len - 1;
+    s->repeat.xfade_pos = 0;
+    s->repeat.xfade_len = 128;
+}
+
 void pfx_activate(perf_fx_engine_t *e, int slot, float velocity) {
+    /* Note-on velocity is deliberately ignored: it and pad pressure are not
+     * on the same scale, so the pressure centre is captured from the first
+     * aftertouch instead (see the settling window below). Kept in the
+     * signature because the host still sends it. */
+    (void)velocity;
     if (slot < 0 || slot >= PFX_NUM_FX) return;
     pfx_slot_t *s = &e->slots[slot];
 
@@ -478,6 +539,10 @@ void pfx_activate(perf_fx_engine_t *e, int slot, float velocity) {
 
     /* Type-specific activation (all BEFORE s->active = 1) */
     if (FX_IS_REPEAT(slot)) {
+        /* Decay is per punch-in: a pad that faded to silence last time must
+         * come back at full level, not stay dead. */
+        s->repeat.decay_gain = 1.0f;
+
         /* Beat repeat: pass through audio for one division, then loop.
          * The capture buffer records live audio continuously, so after
          * one division passes through, we loop from the capture buffer.
@@ -511,30 +576,19 @@ void pfx_activate(perf_fx_engine_t *e, int slot, float velocity) {
 
         /* Scatter: reset step counter and trigger first slice */
         if (slot == FX_SCATTER) {
-            s->repeat.write_pos = -1;   /* step counter, will advance to 0 */
+            s->repeat.write_pos = -1;   /* step counter, advances to 0 first */
             s->repeat.repeat_pos = 0;   /* triggers slice setup on first call */
             s->repeat.frames_captured = 0;
+            s->repeat.bar_start = 0;    /* latched on step 0, which is next */
         }
 
-        /* Reverse: copy last bar from capture buffer, play backwards */
+        /* Reverse: copy the tail of the capture buffer, play it backwards */
         if (slot == FX_REVERSE) {
-            int bar_len = pfx_bpm_to_samples(e->bpm, 4.0f); /* 1 bar = 4 beats */
-            if (bar_len > s->repeat.buf_len) bar_len = s->repeat.buf_len;
-            if (bar_len > e->capture_len) bar_len = e->capture_len;
-            if (bar_len < 128) bar_len = 128;
-            for (int i = 0; i < bar_len; i++) {
-                int src = (e->capture_write_pos - bar_len + i + e->capture_len) % e->capture_len;
-                s->repeat.buf_l[i] = e->capture_buf_l[src];
-                s->repeat.buf_r[i] = e->capture_buf_r[src];
-            }
-            s->repeat.repeat_len = bar_len;
-            s->repeat.read_pos = bar_len - 1;
-            s->repeat.xfade_pos = 0;
-            s->repeat.xfade_len = 128;
+            pfx_reverse_recapture(e, s);
         }
 
         /* Timestretch: create bungee stretcher and prime with capture audio */
-        if (slot == FX_HALF_SPEED) {
+        if (slot == FX_STRETCH) {
             if (!s->bungee) {
                 s->bungee = pfx_bungee_create(PFX_SAMPLE_RATE);
             }
@@ -579,7 +633,7 @@ void pfx_activate(perf_fx_engine_t *e, int slot, float velocity) {
     }
 
     if (FX_IS_DISTORT(slot)) {
-        if (slot == FX_TAPE_STOP) {
+        if (slot == FX_VINYL_BRAKE) {
             if (s->tape.buf_l)
                 memset(s->tape.buf_l, 0, s->tape.buf_len * sizeof(float));
             if (s->tape.buf_r)
@@ -607,6 +661,9 @@ void pfx_activate(perf_fx_engine_t *e, int slot, float velocity) {
         if (slot == FX_VINYL_SIM) {
             s->scatter_seed = 12345;  /* noise seed */
             s->trem_lfo_phase = 0.0f; /* wow LFO */
+            /* Click envelope + polarity for the synthesised-crackle fallback */
+            s->crush_hold_l = 1.0f;
+            s->crush_hold_r = 0.0f;
             svf_reset(&s->sat_filter_l);
             svf_reset(&s->sat_filter_r);
         }
@@ -716,6 +773,48 @@ void pfx_set_latched(perf_fx_engine_t *e, int slot, int latched) {
  * repeat.frames_captured = samples counted during pass-through
  * repeat.write_pos = capture buffer position saved when repeat begins
  * repeat.read_pos = offset within repeat region during playback */
+/* Tone-shaping applied to a captured loop, shared by the beat repeats, Stutter
+ * and Reverse — they differ in how they pick the loop, not in what they do to
+ * it once they have it. Filter and gate are passed explicitly because the
+ * callers keep them on different knobs (Reverse spends param 0 on Length).
+ *
+ * filt: 0 = dark LP, 0.5 = bypass, 1.0 = bright HP
+ * gate: 0 = open, 1.0 = choppy (4 gates per loop cycle) */
+static void repeat_shape(pfx_slot_t *s, float *l, float *r, int pos, int len,
+                          float filt, float gate) {
+    if (filt < 0.45f) {
+        float cutoff = 0.1f + (filt / 0.45f) * 0.9f;
+        float f = cutoff_to_f(cutoff);
+        svf_process(&s->filter_l, *l, f, 0.4f, l, NULL, NULL);
+        svf_process(&s->filter_r, *r, f, 0.4f, r, NULL, NULL);
+    } else if (filt > 0.55f) {
+        float cutoff = ((filt - 0.55f) / 0.45f) * 0.8f;
+        float f = cutoff_to_f(cutoff);
+        float hp_l, hp_r;
+        svf_process(&s->filter_l, *l, f, 0.4f, NULL, &hp_l, NULL);
+        svf_process(&s->filter_r, *r, f, 0.4f, NULL, &hp_r, NULL);
+        *l = hp_l;
+        *r = hp_r;
+    }
+
+    if (gate > 0.05f && len > 0) {
+        float duty = 1.0f - gate * 0.85f;   /* 1.0 -> 0.15 */
+        float sub_phase = ((float)pos / (float)len) * 4.0f;
+        sub_phase = sub_phase - (int)sub_phase;
+        if (sub_phase >= duty) { *l = 0.0f; *r = 0.0f; }
+    }
+}
+
+/* Per-cycle decay for the looping effects: each pass through the captured
+ * material comes back quieter, so a held repeat falls away instead of running
+ * forever at full level. Knob at 0 means no decay at all, which is how these
+ * behaved before the control existed. Called once per loop wrap. */
+static void repeat_decay_step(repeat_t *rp, float decay) {
+    if (decay <= 0.001f) { rp->decay_gain = 1.0f; return; }
+    rp->decay_gain *= (1.0f - decay * 0.5f);
+    if (rp->decay_gain < 0.0001f) rp->decay_gain = 0.0f;
+}
+
 static void process_beat_repeat(pfx_slot_t *s, int slot, float *l, float *r,
                                  perf_fx_engine_t *e) {
     repeat_t *rp = &s->repeat;
@@ -748,41 +847,12 @@ static void process_beat_repeat(pfx_slot_t *s, int slot, float *l, float *r,
     /* Phase 2: loop from private buffer (frozen audio) */
     float gain = pressure_volume_gain(s->pressure, s->velocity, s->settle_counter);
 
+    gain *= rp->decay_gain;                      /* params[2] = Decay */
     float loop_l = rp->buf_l[rp->read_pos] * gain;
     float loop_r = rp->buf_r[rp->read_pos] * gain;
 
-    /* params[0] = Filter: 0=dark LP, 0.5=bypass, 1.0=bright HP */
-    float filt = s->params[0];
-    if (filt < 0.45f) {
-        /* LP sweep: 0.0 → cutoff ~200Hz, 0.45 → full open */
-        float cutoff = 0.1f + (filt / 0.45f) * 0.9f;
-        float f = cutoff_to_f(cutoff);
-        svf_process(&s->filter_l, loop_l, f, 0.4f, &loop_l, NULL, NULL);
-        svf_process(&s->filter_r, loop_r, f, 0.4f, &loop_r, NULL, NULL);
-    } else if (filt > 0.55f) {
-        /* HP sweep: 0.55 → low cutoff, 1.0 → cutoff ~8kHz */
-        float cutoff = ((filt - 0.55f) / 0.45f) * 0.8f;
-        float f = cutoff_to_f(cutoff);
-        float hp_l, hp_r;
-        svf_process(&s->filter_l, loop_l, f, 0.4f, NULL, &hp_l, NULL);
-        svf_process(&s->filter_r, loop_r, f, 0.4f, NULL, &hp_r, NULL);
-        loop_l = hp_l;
-        loop_r = hp_r;
-    }
-
-    /* params[1] = Gate: 0=full open, 1.0=choppy rhythmic gate */
-    float gate = s->params[1];
-    if (gate > 0.05f) {
-        /* Gate based on position within loop: duty cycle shrinks with gate */
-        float duty = 1.0f - gate * 0.85f; /* 1.0 → 0.15 */
-        float loop_phase = (float)rp->read_pos / (float)rp->repeat_len;
-        /* 4 gates per loop cycle */
-        float sub_phase = loop_phase * 4.0f;
-        sub_phase = sub_phase - (int)sub_phase;
-        float gate_gain = (sub_phase < duty) ? 1.0f : 0.0f;
-        loop_l *= gate_gain;
-        loop_r *= gate_gain;
-    }
+    repeat_shape(s, &loop_l, &loop_r, rp->read_pos, rp->repeat_len,
+                 s->params[0], s->params[1]);
 
     /* Crossfade from live to loop at initial transition only.
      * Skip crossfade at loop-back points (xfade_len=0 after first). */
@@ -805,6 +875,7 @@ static void process_beat_repeat(pfx_slot_t *s, int slot, float *l, float *r,
 
     if (rp->read_pos >= rp->repeat_len) {
         rp->read_pos = 0;
+        repeat_decay_step(rp, s->params[2]);
     }
 
     /* Check if rate knob changed — apply at loop boundary or wrap.
@@ -864,8 +935,11 @@ static void process_stutter(pfx_slot_t *s, float *l, float *r,
     if (stutter_len > rp->repeat_len) stutter_len = rp->repeat_len;
 
     /* Read from private buffer (frozen audio) */
-    float loop_l = rp->buf_l[rp->read_pos];
-    float loop_r = rp->buf_r[rp->read_pos];
+    float loop_l = rp->buf_l[rp->read_pos] * rp->decay_gain;
+    float loop_r = rp->buf_r[rp->read_pos] * rp->decay_gain;
+
+    repeat_shape(s, &loop_l, &loop_r, rp->read_pos, stutter_len,
+                 s->params[0], s->params[1]);
 
     if (rp->xfade_pos < rp->xfade_len) {
         float t = (float)rp->xfade_pos / (float)rp->xfade_len;
@@ -881,6 +955,7 @@ static void process_stutter(pfx_slot_t *s, float *l, float *r,
     if (rp->read_pos >= stutter_len) {
         rp->read_pos = 0;
         rp->xfade_pos = 0;
+        repeat_decay_step(rp, s->params[2]);
     }
 }
 
@@ -897,8 +972,19 @@ static void process_stutter(pfx_slot_t *s, float *l, float *r,
  * 64-sample crossfade at every slice boundary.
  */
 
-#define SCATTER_STEPS 8
-static const int scatter_pattern[SCATTER_STEPS] = { 0, 1, 2, 1, 4, 3, 6, 5 };
+#define SCATTER_STEPS    8
+#define SCATTER_PATTERNS 5
+
+/* Slice orders, selected by params[0]. Index 0 is the order this had when it
+ * was the only one, so the Pattern knob at rest reproduces the old arrangement.
+ * Each entry says which slice of the latched bar to play on that step. */
+static const int scatter_patterns[SCATTER_PATTERNS][SCATTER_STEPS] = {
+    { 0, 1, 2, 1, 4, 3, 6, 5 },   /* Shuffle    — keeps the pulse, nudges it */
+    { 0, 0, 2, 2, 4, 4, 6, 6 },   /* Stutter    — every slice played twice */
+    { 0, 4, 1, 5, 2, 6, 3, 7 },   /* Interleave — halves of the bar alternate */
+    { 0, 3, 1, 7, 2, 5, 4, 6 },   /* Scramble   — no two neighbours adjacent */
+    { 7, 6, 5, 4, 3, 2, 1, 0 }    /* Retrograde — the bar back to front */
+};
 
 /* Deterministic reverse decision per step index.
  * Returns 1 if this step should be reversed at the given reverse weight.
@@ -921,10 +1007,14 @@ static void process_scatter(pfx_slot_t *s, float *l, float *r,
     if (slice_len > e->row4_buf_len / SCATTER_STEPS)
         slice_len = e->row4_buf_len / SCATTER_STEPS;
 
-    /* Pressure-driven parameters (continuous, relative to initial hit) */
+    /* Knobs set the base, pressure pushes either side of it.
+     * params[0] = Pattern (which slice order)
+     * params[1] = Gate    (how much of each slice is silenced)
+     * params[2] = Revrse  (how many steps play backwards) */
     float p = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    float gate_ratio = 1.0f - p * 0.6f;        /* 1.0 → 0.4 */
-    float rev_weight = p * 0.5f;                /* 0.0 → 0.5 */
+    float gate_amt = pfx_mod(s->params[1], p, 0.6f);
+    float rev_weight = pfx_mod(s->params[2], p, 0.5f) * 0.5f;
+    float gate_ratio = 1.0f - gate_amt * 0.6f;  /* 1.0 → 0.4 */
     int gate_len = (int)(slice_len * gate_ratio);
     if (gate_len < 64) gate_len = 64;
 
@@ -933,13 +1023,28 @@ static void process_scatter(pfx_slot_t *s, float *l, float *r,
         int step = (rp->write_pos + 1) % SCATTER_STEPS;
         rp->write_pos = step;
 
-        /* Look up which slice index to play from the pattern */
-        int slice_idx = scatter_pattern[step];
+        /* Pattern is only consulted here, not per sample. */
+        int pat = (int)(s->params[0] * (float)(SCATTER_PATTERNS - 1) + 0.5f);
+        if (pat < 0) pat = 0;
+        if (pat >= SCATTER_PATTERNS) pat = SCATTER_PATTERNS - 1;
 
-        /* Base: the most recent 8 slices in the row4 buffer */
-        int bar_start = (e->row4_write_pos - SCATTER_STEPS * slice_len
-                        + e->row4_buf_len) % e->row4_buf_len;
-        int slice_start = (bar_start + slice_idx * slice_len) % e->row4_buf_len;
+        /* Latch the bar at the top of each cycle.
+         *
+         * This used to recompute the base from the live write position on
+         * *every* step, so the window being rearranged slid forward with the
+         * playhead — by the back half of the pattern it was playing nearly
+         * current audio, which is why it read as the source with holes punched
+         * in it rather than as rearrangement. Latching at step 0 means all
+         * eight steps rearrange one fixed bar, and re-latching each cycle keeps
+         * it musical and keeps the read inside the 4s row4 buffer. */
+        if (step == 0) {
+            rp->bar_start = (e->row4_write_pos - SCATTER_STEPS * slice_len
+                            + e->row4_buf_len) % e->row4_buf_len;
+        }
+
+        /* Look up which slice index to play from the selected pattern */
+        int slice_idx = scatter_patterns[pat][step];
+        int slice_start = (rp->bar_start + slice_idx * slice_len) % e->row4_buf_len;
 
         /* Determine direction */
         int reversed = scatter_is_reversed(step, rev_weight);
@@ -998,8 +1103,13 @@ static void process_reverse(pfx_slot_t *s, float *l, float *r,
     float gain = pressure_volume_gain(s->pressure, s->velocity, s->settle_counter);
 
     if (rp->read_pos >= 0 && rp->read_pos < rp->repeat_len) {
+        gain *= rp->decay_gain;                  /* params[2] = Decay */
         float rev_l = rp->buf_l[rp->read_pos] * gain;
         float rev_r = rp->buf_r[rp->read_pos] * gain;
+
+        /* params[1] = Filter (params[0] is Length here). No gate on Reverse. */
+        repeat_shape(s, &rev_l, &rev_r, rp->read_pos, rp->repeat_len,
+                     s->params[1], 0.0f);
 
         /* Crossfade from live to reverse at start */
         if (rp->xfade_pos < rp->xfade_len) {
@@ -1015,39 +1125,28 @@ static void process_reverse(pfx_slot_t *s, float *l, float *r,
 
     rp->read_pos--;
     if (rp->read_pos < 0) {
-        /* Reached the start — re-capture the latest bar and loop */
-        int bar_len = pfx_bpm_to_samples(e->bpm, 4.0f);
-        if (bar_len > rp->buf_len) bar_len = rp->buf_len;
-        if (bar_len > e->capture_len) bar_len = e->capture_len;
-        if (bar_len < 128) bar_len = 128;
-        for (int i = 0; i < bar_len; i++) {
-            int src = (e->capture_write_pos - bar_len + i + e->capture_len) % e->capture_len;
-            rp->buf_l[i] = e->capture_buf_l[src];
-            rp->buf_r[i] = e->capture_buf_r[src];
-        }
-        rp->repeat_len = bar_len;
-        rp->read_pos = bar_len - 1;
-        rp->xfade_pos = 0;
-        rp->xfade_len = 128;
+        /* Reached the start — re-capture at the current Length and loop */
+        repeat_decay_step(rp, s->params[2]);
+        pfx_reverse_recapture(e, s);
     }
 }
 
-/* Bungee timestretch: half speed without pitch change.
- * Called per-sample. Accumulates input into bungee, reads stretched output. */
-static void process_half_speed(pfx_slot_t *s, float *l, float *r,
-                                perf_fx_engine_t *e) {
+/* Bungee timestretch: slow the audio down without changing its pitch.
+ * Called per-sample. Accumulates input into bungee, reads stretched output.
+ *
+ * params[0] = Speed base, params[1] = Filter (tone of the stretched output) */
+static void process_stretch(pfx_slot_t *s, float *l, float *r,
+                             perf_fx_engine_t *e) {
     (void)e;
     pfx_bungee_t *b = (pfx_bungee_t *)s->bungee;
     if (!b) return;
 
-    /* Pressure: harder → slower (0.25x), neutral → 0.5x, lighter → 1.0x */
+    /* Knob picks the resting speed, pressure moves it: harder = slower.
+     * The knob's own curve is 0 -> 1.0x, 0.5 -> 0.5x, 1.0 -> 0.25x. */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    float speed;
-    if (pr < 0.5f) {
-        speed = 0.5f + pr;          /* 0.5 → 1.0 */
-    } else {
-        speed = 0.5f - (pr - 0.5f) * 0.5f;  /* 0.5 → 0.25 */
-    }
+    float k = pfx_mod(s->params[0], pr, 1.0f);
+    float speed = (k < 0.5f) ? (1.0f - k)            /* 1.0 -> 0.5 */
+                             : (0.5f - (k - 0.5f) * 0.5f);  /* 0.5 -> 0.25 */
     pfx_bungee_set_speed(b, speed);
 
     /* Feed this sample to bungee */
@@ -1059,12 +1158,40 @@ static void process_half_speed(pfx_slot_t *s, float *l, float *r,
     pfx_bungee_read(b, out_lr, 1);
     *l = out_lr[0];
     *r = out_lr[1];
+
+    /* params[1] = Filter, same LP/bypass/HP shape as the beat repeats */
+    float filt = s->params[1];
+    if (filt < 0.45f) {
+        float f = cutoff_to_f(0.1f + (filt / 0.45f) * 0.9f);
+        svf_process(&s->filter_l, *l, f, 0.4f, l, NULL, NULL);
+        svf_process(&s->filter_r, *r, f, 0.4f, r, NULL, NULL);
+    } else if (filt > 0.55f) {
+        float f = cutoff_to_f(((filt - 0.55f) / 0.45f) * 0.8f);
+        float hp_l, hp_r;
+        svf_process(&s->filter_l, *l, f, 0.4f, NULL, &hp_l, NULL);
+        svf_process(&s->filter_r, *r, f, 0.4f, NULL, &hp_r, NULL);
+        *l = hp_l; *r = hp_r;
+    }
 }
 
 /* ============================================================
  * Row 3: Filter Sweep FX (slots 8-15)
  * Phase counter 0->1 drives the sweep while active
  * ============================================================ */
+
+/* Depth knob -> sweep excursion multiplier, centred so 0.5 returns exactly
+ * 1.0 and the sweep keeps the full travel it had before the knob existed. */
+static inline float pfx_depth_scale(float k) {
+    if (k < 0.5f) return 0.2f + k * 1.6f;       /* 0.2x -> 1x */
+    return 1.0f + (k - 0.5f) * 1.6f;            /* 1x -> 1.8x, clamped later */
+}
+
+/* Speed knob -> rate multiplier, centred so 0.5 returns exactly 1.0 and the
+ * effect keeps whatever rate it was hand-tuned to before the knob existed. */
+static inline float pfx_speed_mult(float k) {
+    if (k < 0.5f) return 0.25f + k * 1.5f;      /* 0.25x -> 1x */
+    return 1.0f + (k - 0.5f) * 6.0f;            /* 1x -> 4x */
+}
 
 /* Trapezoidal shape from phase 0→4:
  * 0→1: ramp up, 1→2: hold high, 2→3: ramp down, 3→4: hold low */
@@ -1085,7 +1212,10 @@ static void advance_filter_phase(pfx_slot_t *s, int slot, float bpm) {
     if (slot == FX_LP_SWEEP_DOWN || slot == FX_HP_SWEEP_UP ||
         slot == FX_BP_RISE || slot == FX_BP_FALL || slot == FX_RESO_SWEEP) {
         float b = bpm < 20.0f ? 120.0f : bpm;
+        /* params[0] = Speed: 0.5 keeps the one-bar-per-stage sweep these had
+         * before the knob existed; either side scales it 0.25x .. 4x. */
         float rate = b / (60.0f * 4.0f * PFX_SAMPLE_RATE);
+        rate *= pfx_speed_mult(s->params[0]);
         s->phase += rate;
         if (s->phase >= 4.0f) s->phase -= 4.0f;
         return;
@@ -1129,8 +1259,9 @@ static void process_lp_sweep_down(pfx_slot_t *s, float *l, float *r) {
     /* Trapezoidal phase: sweep down, hold, sweep up, hold */
     float tri = phase_to_trapezoid(s->phase);
 
-    /* Base sweep: open (tri=0) → nearly closed (tri=1) */
-    float sweep_cutoff = 1.0f - tri * 0.95f;  /* 1.0 → 0.05 */
+    /* Base sweep: open (tri=0) → nearly closed (tri=1).
+     * params[2] = Depth scales the excursion; 0.5 is the original full travel. */
+    float sweep_cutoff = 1.0f - tri * 0.95f * pfx_depth_scale(s->params[2]);
 
     /* Pressure opens the filter (inverse): harder press = higher cutoff.
      * At center (0.5) = no offset. Above center = pushes cutoff up. */
@@ -1142,7 +1273,8 @@ static void process_lp_sweep_down(pfx_slot_t *s, float *l, float *r) {
     if (cutoff > 1.0f) cutoff = 1.0f;
 
     float f = cutoff_to_f(cutoff);
-    float q = 0.2f + tri * 0.5f; /* resonance increases as it sweeps down */
+    /* resonance increases as it sweeps down; params[1] = Reso scales it */
+    float q = (0.2f + tri * 0.5f) * pfx_reso_scale(s->params[1]);
     float out_l, out_r;
     svf_process(&s->filter_l, *l, f, q, &out_l, NULL, NULL);
     svf_process(&s->filter_r, *r, f, q, &out_r, NULL, NULL);
@@ -1153,8 +1285,9 @@ static void process_hp_sweep_up(pfx_slot_t *s, float *l, float *r) {
     /* Trapezoidal phase: sweep up, hold, sweep down, hold */
     float tri = phase_to_trapezoid(s->phase);
 
-    /* Base sweep: open (tri=0) → high-passed (tri=1) */
-    float sweep_cutoff = tri * 0.9f;  /* 0.0 → 0.9 */
+    /* Base sweep: open (tri=0) → high-passed (tri=1).
+     * params[2] = Depth scales the excursion. */
+    float sweep_cutoff = tri * 0.9f * pfx_depth_scale(s->params[2]);
 
     /* Pressure pushes cutoff higher (harder = more HP) */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
@@ -1165,7 +1298,7 @@ static void process_hp_sweep_up(pfx_slot_t *s, float *l, float *r) {
     if (cutoff > 0.95f) cutoff = 0.95f;
 
     float f = cutoff_to_f(cutoff);
-    float q = 0.2f + tri * 0.4f;
+    float q = (0.2f + tri * 0.4f) * pfx_reso_scale(s->params[1]);
     float out_l, out_r;
     svf_process(&s->filter_l, *l, f, q, NULL, &out_l, NULL);
     svf_process(&s->filter_r, *r, f, q, NULL, &out_r, NULL);
@@ -1175,7 +1308,7 @@ static void process_hp_sweep_up(pfx_slot_t *s, float *l, float *r) {
 static void process_bp_rise(pfx_slot_t *s, float *l, float *r) {
     /* Trapezoidal phase: sweep low→high, hold, sweep high→low, hold */
     float tri = phase_to_trapezoid(s->phase);
-    float sweep_cutoff = 0.1f + tri * 0.7f;
+    float sweep_cutoff = 0.1f + tri * 0.7f * pfx_depth_scale(s->params[2]);
 
     /* Pressure offsets cutoff */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
@@ -1183,7 +1316,7 @@ static void process_bp_rise(pfx_slot_t *s, float *l, float *r) {
     cutoff = clampf(cutoff, 0.05f, 0.9f);
 
     float f = cutoff_to_f(cutoff);
-    float q = 0.1f + (1.0f - tri) * 0.3f;
+    float q = (0.1f + (1.0f - tri) * 0.3f) * pfx_reso_scale(s->params[1]);
     float out_l, out_r;
     svf_process(&s->filter_l, *l, f, q, NULL, NULL, &out_l);
     svf_process(&s->filter_r, *r, f, q, NULL, NULL, &out_r);
@@ -1193,7 +1326,7 @@ static void process_bp_rise(pfx_slot_t *s, float *l, float *r) {
 static void process_bp_fall(pfx_slot_t *s, float *l, float *r) {
     /* Trapezoidal phase: sweep high→low, hold, sweep low→high, hold */
     float tri = phase_to_trapezoid(s->phase);
-    float sweep_cutoff = 0.8f - tri * 0.7f;
+    float sweep_cutoff = 0.8f - tri * 0.7f * pfx_depth_scale(s->params[2]);
 
     /* Pressure offsets cutoff */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
@@ -1201,7 +1334,7 @@ static void process_bp_fall(pfx_slot_t *s, float *l, float *r) {
     cutoff = clampf(cutoff, 0.05f, 0.9f);
 
     float f = cutoff_to_f(cutoff);
-    float q = 0.1f + tri * 0.3f;
+    float q = (0.1f + tri * 0.3f) * pfx_reso_scale(s->params[1]);
     float out_l, out_r;
     svf_process(&s->filter_l, *l, f, q, NULL, NULL, &out_l);
     svf_process(&s->filter_r, *r, f, q, NULL, NULL, &out_r);
@@ -1219,13 +1352,14 @@ static void process_reso_sweep(pfx_slot_t *s, float *l, float *r) {
     cutoff = clampf(cutoff, 0.05f, 0.9f);
 
     float f = cutoff_to_f(cutoff);
-    float q = 0.05f + (1.0f - pr) * 0.03f; /* very high Q, pressure tightens */
+    /* very high Q, pressure tightens further; params[1] = Reso scales it */
+    float q = (0.05f + (1.0f - pr) * 0.03f) * pfx_reso_scale(s->params[1]);
     float out_l, out_r;
     svf_process(&s->filter_l, *l, f, q, NULL, NULL, &out_l);
     svf_process(&s->filter_r, *r, f, q, NULL, NULL, &out_r);
-    /* Blend: mostly resonant peak + some dry */
-    *l = *l * 0.3f + out_l * 0.7f;
-    *r = *r * 0.3f + out_r * 0.7f;
+    /* Dry blend is the Mix knob's job now — see apply_wet(). */
+    *l = out_l;
+    *r = out_r;
 }
 
 static void process_phaser_fx(pfx_slot_t *s, float *l, float *r) {
@@ -1250,9 +1384,10 @@ static void process_phaser_fx(pfx_slot_t *s, float *l, float *r) {
         out = y;
     }
 
-    /* Dramatic on tap: full mix by default */
-    *l = *l * 0.3f + out * 0.7f;
-    *r = *r * 0.3f + out * 0.7f;
+    /* Dry blend is the Mix knob's job now — see apply_wet(). Mix defaults to
+     * 0.7 for this slot, which is the 0.3/0.7 split this used to hardcode. */
+    *l = out;
+    *r = out;
 }
 
 static void process_flanger_fx(pfx_slot_t *s, float *l, float *r) {
@@ -1274,16 +1409,17 @@ static void process_flanger_fx(pfx_slot_t *s, float *l, float *r) {
     md->buf_r[wp] = *r + dr * fb;
     md->write_pos = (wp + 1) % md->buf_len;
 
-    /* Dramatic mix */
-    *l = *l * 0.4f + dl * 0.6f;
-    *r = *r * 0.4f + dr * 0.6f;
+    /* Dry blend is the Mix knob's job now (default 0.6 = the old 0.4/0.6). */
+    *l = dl;
+    *r = dr;
 }
 
 static void process_auto_filter(pfx_slot_t *s, float *l, float *r) {
     float lfo = sinf(s->phase * 2.0f * M_PI);
     float depth = 0.3f + s->params[0] * 0.3f;
-    float center = 0.2f + s->params[1] * 0.5f;
-    float reso = 0.1f + s->params[2] * 0.08f;
+    /* params[1] = Reso, params[2] = Center. Sweep rate stays on pressure. */
+    float center = 0.2f + s->params[2] * 0.5f;
+    float reso = 0.14f * pfx_reso_scale(s->params[1]);
 
     float cutoff = center + lfo * depth;
     cutoff = clampf(cutoff, 0.01f, 0.95f);
@@ -1304,16 +1440,19 @@ static void process_auto_filter(pfx_slot_t *s, float *l, float *r) {
 static void process_delay_throw(pfx_slot_t *s, float *l, float *r,
                                  int feeding, float bpm, float beat_mult) {
     delay_t *d = &s->delay;
-    float filt = s->params[2];
+    /* params[1] = Tone. This used to read params[2], which the UI labelled
+     * "Level" — so the tone control was on the wrong knob and the two knobs
+     * labelled Feedbk and Tone did nothing at all. */
+    float filt = s->params[1];
 
     float b = bpm < 20.0f ? 120.0f : bpm;
     int delay_samples = (int)(60.0f / b * beat_mult * PFX_SAMPLE_RATE);
     if (delay_samples < 100) delay_samples = 100;
     if (delay_samples > PFX_SAMPLE_RATE) delay_samples = PFX_SAMPLE_RATE;
 
-    /* Pressure adds feedback, but cap at 0.5 for quick decay */
+    /* params[0] = Feedbk base, pressure moves it. Capped at 0.5 for quick decay. */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    float fb = 0.2f + pr * 0.3f;  /* 0.2 → 0.5 */
+    float fb = 0.2f + pfx_mod(s->params[0], pr, 0.6f) * 0.3f;  /* 0.2 → 0.5 */
 
     float dl, dr;
     delay_read(d, delay_samples, &dl, &dr);
@@ -1327,8 +1466,10 @@ static void process_delay_throw(pfx_slot_t *s, float *l, float *r,
     else
         delay_write(d, d->fb_lp_l * fb, d->fb_lp_r * fb);
 
-    *l += dl * 0.7f;
-    *r += dr * 0.7f;
+    /* Send topology: add the wet at unity here, apply_wet() scales it by the
+     * Level knob (default 0.5 -> 0.7x, the factor this used to hardcode). */
+    *l += dl;
+    *r += dr;
 }
 
 static void process_ping_pong_throw(pfx_slot_t *s, float *l, float *r,
@@ -1344,25 +1485,39 @@ static void process_ping_pong_throw(pfx_slot_t *s, float *l, float *r,
     if (half_delay > PFX_SAMPLE_RATE / 2) half_delay = PFX_SAMPLE_RATE / 2;
     int full_delay = half_delay * 2;
 
+    /* params[0] = Feedbk base, params[1] = Tone. Both were dead here: this
+     * function read no params at all. */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    float fb = 0.2f + pr * 0.3f;
+    float fb = 0.2f + pfx_mod(s->params[0], pr, 0.6f) * 0.3f;
 
     /* Read L at 1x (short tap), R at 2x (long tap) */
     float dl_short, dr_short, dl_long, dr_long;
     delay_read(d, half_delay, &dl_short, &dr_short);
     delay_read(d, full_delay, &dl_long, &dr_long);
 
+    /* Damping in the feedback path, same shape as the plain delays.
+     *
+     * This is the one place wiring the knobs up changed how something sounds:
+     * ping-pong feedback was previously undamped, so repeats stayed bright all
+     * the way down. Giving it a Tone knob means giving it a filter, and the
+     * default matches the plain delays because DLY and PP are one family — a
+     * player expects the same knob to do the same thing on both. */
+    float f_coeff = 0.1f + s->params[1] * 0.8f;
+    d->fb_lp_l += f_coeff * (dr_long - d->fb_lp_l);
+    d->fb_lp_r += f_coeff * (dl_short - d->fb_lp_r);
+
     float in_l = feeding ? *l : 0.0f;
     float in_r = feeding ? *r : 0.0f;
 
     /* Cross-feed: R delay output feeds back into L, and vice versa */
     delay_write(d,
-        in_l + dr_long * fb,
-        in_r + dl_short * fb);
+        in_l + d->fb_lp_l * fb,
+        in_r + d->fb_lp_r * fb);
 
-    /* L gets the short tap, R gets the long tap — creates the panning bounce */
-    *l += dl_short * 0.7f;
-    *r += dr_long * 0.7f;
+    /* L gets the short tap, R gets the long tap — creates the panning bounce.
+     * Level scaling happens in apply_wet(). */
+    *l += dl_short;
+    *r += dr_long;
 }
 
 /* Reverb: per-sample processing via pfx_revsc (Costello/Soundpipe FDN reverb).
@@ -1383,10 +1538,13 @@ static void process_reverb_throw(pfx_slot_t *s, int slot, float *l, float *r,
         default:           base_fb = 0.80f; lpfreq = 10000.0f; break;
     }
 
-    /* Pressure modulates feedback: center = base, full = 0.97 */
+    /* params[0] = Decay base, pressure moves it: centre = the slot's own
+     * character, full = 0.97. params[1] = Tone scales the damping cutoff.
+     * Both knobs were dead here — all four reverbs ignored every param. */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    rv->feedback = base_fb + pr * (0.97f - base_fb);
-    rv->lpfreq = lpfreq;
+    float decay = pfx_mod(s->params[0], pr, 1.0f);
+    rv->feedback = base_fb + decay * (0.97f - base_fb);
+    rv->lpfreq = lpfreq * (0.25f + s->params[1] * 1.5f);
 
     float in_l = feeding ? *l : 0.0f;
     float in_r = feeding ? *r : 0.0f;
@@ -1403,29 +1561,45 @@ static void process_reverb_throw(pfx_slot_t *s, int slot, float *l, float *r,
     float out_l, out_r;
     pfx_revsc_process(rv, in_l, in_r, &out_l, &out_r);
 
-    /* Send-style mix */
-    *l += out_l * 0.7f;
-    *r += out_r * 0.7f;
+    /* Send topology — apply_wet() applies the Level knob. */
+    *l += out_l;
+    *r += out_r;
 }
 
 /* ============================================================
  * Row 1: Distortion & Rhythm FX (slots 24-31)
  * ============================================================ */
 
-/* Pressure -> bit depth (harder = fewer bits) */
+/* Post-distortion tone control: a lowpass that is transparent at 1.0 and
+ * progressively darker below it. Shared by Bitcrush, Downsample and Octave
+ * Down, whose Tone knobs all default to 1.0 so wiring them up left the sound
+ * of those effects unchanged. */
+static void distort_tone(pfx_slot_t *s, float *l, float *r, float tone) {
+    if (tone >= 0.95f) return;
+    float f = cutoff_to_f(0.25f + tone * 0.7f);
+    float fl, fr;
+    svf_process(&s->sat_filter_l, *l, f, 0.6f, &fl, NULL, NULL);
+    svf_process(&s->sat_filter_r, *r, f, 0.6f, &fr, NULL, NULL);
+    *l = fl; *r = fr;
+}
+
+/* params[0] = Bits base (pressure moves it), params[1] = Tone */
 static void process_bitcrush(pfx_slot_t *s, float *l, float *r) {
-    /* Zero pressure = 8 bits (dramatic), full pressure = 1 bit */
-    float bits = 8.0f - pressure_relative(s->pressure, s->velocity, s->settle_counter) * 7.0f;
+    float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
+    /* 8 bits (dramatic) down to 1 bit (destroyed) */
+    float bits = 8.0f - pfx_mod(s->params[0], pr, 1.0f) * 7.0f;
     if (bits < 1.0f) bits = 1.0f;
     float levels = powf(2.0f, bits);
     *l = roundf(*l * levels) / levels;
     *r = roundf(*r * levels) / levels;
+    distort_tone(s, l, r, s->params[1]);
 }
 
-/* Pressure -> sample rate reduction */
+/* params[0] = Rate base (pressure moves it), params[1] = Tone */
 static void process_downsample(pfx_slot_t *s, float *l, float *r) {
-    /* Zero pressure = period 8 (noticeable), full pressure = period 64 (extreme) */
-    int period = 8 + (int)(pressure_relative(s->pressure, s->velocity, s->settle_counter) * 56.0f);
+    float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
+    /* Hold period 8 (noticeable) up to 64 (extreme) */
+    int period = 8 + (int)(pfx_mod(s->params[0], pr, 1.0f) * 56.0f);
 
     s->crush_count++;
     if (s->crush_count >= (unsigned int)period) {
@@ -1435,33 +1609,7 @@ static void process_downsample(pfx_slot_t *s, float *l, float *r) {
     }
     *l = s->crush_hold_l;
     *r = s->crush_hold_r;
-}
-
-/* Pressure -> deceleration speed */
-static void process_tape_stop(pfx_slot_t *s, float *l, float *r) {
-    tape_stop_t *t = &s->tape;
-
-    t->buf_l[t->write_pos] = *l;
-    t->buf_r[t->write_pos] = *r;
-    t->write_pos = (t->write_pos + 1) % t->buf_len;
-
-    /* Pressure controls deceleration: more pressure = faster stop */
-    float decel = 0.00005f + pressure_relative(s->pressure, s->velocity, s->settle_counter) * 0.0005f;
-    t->speed -= decel;
-    if (t->speed < 0.0f) t->speed = 0.0f;
-
-    if (t->speed > 0.01f) {
-        int pos0 = ((int)t->read_pos) % t->buf_len;
-        *l = t->buf_l[pos0];
-        *r = t->buf_r[pos0];
-        t->read_pos += t->speed;
-        if (t->read_pos >= (float)t->buf_len)
-            t->read_pos -= (float)t->buf_len;
-    } else {
-        int pos = ((int)t->read_pos) % t->buf_len;
-        *l = t->buf_l[pos] * 0.98f;
-        *r = t->buf_r[pos] * 0.98f;
-    }
+    distort_tone(s, l, r, s->params[1]);
 }
 
 /* Vinyl brake: same as tape stop but slower with spindown character */
@@ -1472,8 +1620,9 @@ static void process_vinyl_brake(pfx_slot_t *s, float *l, float *r) {
     t->buf_r[t->write_pos] = *r;
     t->write_pos = (t->write_pos + 1) % t->buf_len;
 
-    /* Slower, more gradual stop. Pressure controls speed. */
-    float decel = 0.00002f + pressure_relative(s->pressure, s->velocity, s->settle_counter) * 0.0002f;
+    /* params[0] = Rate base, pressure moves it: harder = faster spindown. */
+    float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
+    float decel = 0.00002f + pfx_mod(s->params[0], pr, 1.0f) * 0.0002f;
     t->speed -= decel;
     if (t->speed < 0.0f) t->speed = 0.0f;
 
@@ -1490,22 +1639,27 @@ static void process_vinyl_brake(pfx_slot_t *s, float *l, float *r) {
         *r = t->buf_r[pos] * 0.97f;
     }
 
-    /* Add noise at low speeds for vinyl character */
+    /* params[2] = Tone: the platter dulls as it slows, tape-style */
+    distort_tone(s, l, r, s->params[2]);
+
+    /* params[1] = Noise: surface rumble as the platter slows */
     if (t->speed < 0.3f) {
         unsigned int seed = (unsigned int)(t->read_pos * 1000.0f);
-        float noise = white_noise(&seed) * (0.3f - t->speed) * 0.08f;
+        float noise = white_noise(&seed) * (0.3f - t->speed)
+                    * (s->params[1] * 0.16f);
         *l += noise;
         *r += noise;
     }
 }
 
-/* Pressure -> drive amount */
+/* params[0] = Drive base (pressure moves it), params[1] = Tone.
+ * Drive used to be pressure-only while params[0] — labelled "Drive" in the UI —
+ * silently drove the tone filter instead. */
 static void process_saturate(pfx_slot_t *s, float *l, float *r) {
-    /* Zero pressure = gentle drive (1.5x), full pressure = heavy drive (12x) */
-    float drive = 1.5f + pressure_relative(s->pressure, s->velocity, s->settle_counter) * 10.5f;
-    float tone = s->params[0];
-
-    float dry_l = *l, dry_r = *r;
+    float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
+    /* gentle (1.5x) up to heavy (12x) */
+    float drive = 1.5f + pfx_mod(s->params[0], pr, 1.0f) * 10.5f;
+    float tone = s->params[1];
 
     *l = fast_tanh(*l * drive);
     *r = fast_tanh(*r * drive);
@@ -1518,10 +1672,7 @@ static void process_saturate(pfx_slot_t *s, float *l, float *r) {
         svf_process(&s->sat_filter_r, *r, f, 0.5f, &fr, NULL, NULL);
         *l = fl; *r = fr;
     }
-
-    /* 70% wet for dramatic effect on tap */
-    *l = dry_l * 0.3f + *l * 0.7f;
-    *r = dry_r * 0.3f + *r * 0.7f;
+    /* Dry blend is the Mix knob's job now (default 0.7 = the old 0.3/0.7). */
 }
 
 /* Pressure -> gate depth */
@@ -1529,19 +1680,28 @@ static void process_gate_duck(pfx_slot_t *s, float *l, float *r,
                                perf_fx_engine_t *e) {
     ducker_t *dk = &s->ducker;
 
-    /* BPM-synced quarter note gate */
-    float samples_per_beat = (60.0f / e->bpm) * PFX_SAMPLE_RATE;
-    float phase_inc = 1.0f / samples_per_beat;
-    dk->phase += phase_inc;
+    /* params[0] = Rate. BPM-synced; 0.5 is the quarter note this was fixed at.
+     * Quantised to musical divisions rather than swept, because a gate that
+     * drifts off the grid is not a gate. */
+    static const float gate_div[5] = { 1.0f, 0.5f, 0.25f, 0.125f, 0.0625f };
+    int di = (int)(s->params[0] * 4.99f);
+    if (di < 0) di = 0;
+    if (di > 4) di = 4;
+    float b = e->bpm < 20.0f ? 120.0f : e->bpm;
+    float samples_per_cycle = (60.0f / b) * PFX_SAMPLE_RATE * (gate_div[di] * 4.0f);
+    if (samples_per_cycle < 32.0f) samples_per_cycle = 32.0f;
+    dk->phase += 1.0f / samples_per_cycle;
     if (dk->phase >= 1.0f) dk->phase -= 1.0f;
 
-    /* Pressure controls gate open length: center (0.5) = 50% duty,
-     * less pressure = shorter gate (more choppy), more = longer (subtle) */
+    /* params[1] = Duty base, pressure moves it: shorter = choppier. */
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    float duty = 0.15f + pr * 0.7f; /* 0.15 to 0.85 */
+    float duty = 0.15f + pfx_mod(s->params[1], pr, 1.0f) * 0.7f; /* 0.15 to 0.85 */
 
-    /* Square gate: open when phase < duty, closed otherwise */
-    float target_gain = (dk->phase < duty) ? 1.0f : 0.0f;
+    /* Square gate: open when phase < duty, ducked otherwise.
+     * params[2] = Depth is how far it ducks — this is the wet amount by its
+     * real name, so the effect has no separate Mix. 1.0 = full gate. */
+    float depth = s->params[2];
+    float target_gain = (dk->phase < duty) ? 1.0f : (1.0f - depth);
 
     /* Very fast smoothing to avoid clicks (~1ms) */
     float coeff = 0.95f;
@@ -1551,57 +1711,30 @@ static void process_gate_duck(pfx_slot_t *s, float *l, float *r,
     *r *= dk->env;
 }
 
-/* Pressure -> LFO speed for tremolo */
+/* params[0] = Rate base (pressure moves it), params[1] = Depth.
+ * Depth used to sit on params[0], which the UI labelled "Rate" — so the one
+ * live knob on this effect moved the wrong thing. */
 static void process_tremolo(pfx_slot_t *s, float *l, float *r) {
-    /* Base rate 2 Hz, pressure goes up to 20 Hz */
-    float rate = 2.0f + pressure_relative(s->pressure, s->velocity, s->settle_counter) * 18.0f;
-    float depth = 0.5f + s->params[0] * 0.5f;
+    float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
+    /* 2 Hz up to 20 Hz */
+    float rate = 2.0f + pfx_mod(s->params[0], pr, 1.0f) * 18.0f;
+    float depth = 0.5f + s->params[1] * 0.5f;
 
     s->trem_lfo_phase += rate / PFX_SAMPLE_RATE;
     if (s->trem_lfo_phase >= 1.0f) s->trem_lfo_phase -= 1.0f;
 
+    /* params[2] = Shape morphs the LFO from sine to square. A Mix knob here
+     * would only have duplicated Depth. */
     float lfo = sinf(s->trem_lfo_phase * 2.0f * M_PI);
+    float shape = s->params[2];
+    if (shape > 0.001f) {
+        float sq = (lfo >= 0.0f) ? 1.0f : -1.0f;
+        lfo = lfo + (sq - lfo) * shape;
+    }
     float gain = 1.0f - depth * (0.5f + 0.5f * lfo);
 
     *l *= gain;
     *r *= gain;
-}
-
-/* Pressure -> chorus depth */
-static void process_chorus_fx(pfx_slot_t *s, float *l, float *r) {
-    mod_delay_t *md = &s->mod_delay;
-    if (!md->buf_l) return;
-
-    float rate = 0.5f + s->params[0] * 3.0f;
-    /* Zero pressure = moderate depth, full pressure = deep chorus */
-    float depth = (0.002f + pressure_relative(s->pressure, s->velocity, s->settle_counter) * 0.008f) * PFX_SAMPLE_RATE;
-    float fb = s->params[1] * 0.5f;
-
-    md->lfo_phase += rate / PFX_SAMPLE_RATE;
-    if (md->lfo_phase >= 1.0f) md->lfo_phase -= 1.0f;
-
-    float lfo = sinf(md->lfo_phase * 2.0f * M_PI);
-
-    /* Write with feedback */
-    int wp = md->write_pos;
-    float delay_l = 300.0f + depth * lfo;
-    float delay_r = 300.0f + depth * sinf((md->lfo_phase + 0.25f) * 2.0f * M_PI);
-    delay_l = clampf(delay_l, 1.0f, (float)(md->buf_len - 2));
-    delay_r = clampf(delay_r, 1.0f, (float)(md->buf_len - 2));
-
-    int fb_pos_l = (wp - (int)delay_l + md->buf_len) % md->buf_len;
-    int fb_pos_r = (wp - (int)delay_r + md->buf_len) % md->buf_len;
-    md->buf_l[wp] = *l + md->buf_l[fb_pos_l] * fb;
-    md->buf_r[wp] = *r + md->buf_r[fb_pos_r] * fb;
-    md->write_pos = (wp + 1) % md->buf_len;
-
-    int pos_l = (md->write_pos - (int)delay_l + md->buf_len) % md->buf_len;
-    int pos_r = (md->write_pos - (int)delay_r + md->buf_len) % md->buf_len;
-    float wet_l = md->buf_l[pos_l];
-    float wet_r = md->buf_r[pos_r];
-
-    *l = *l * 0.5f + wet_l * 0.5f;
-    *r = *r * 0.5f + wet_r * 0.5f;
 }
 
 /* Vinyl sim: SP-303/404-inspired.
@@ -1610,7 +1743,10 @@ static void process_chorus_fx(pfx_slot_t *s, float *l, float *r) {
 static void process_vinyl_sim(pfx_slot_t *s, float *l, float *r,
                                perf_fx_engine_t *e) {
     float pr = pressure_relative(s->pressure, s->velocity, s->settle_counter);
-    float intensity = 0.3f + pr * 0.7f;
+    /* params[1] = Warmth base (pressure moves it) drives the filter, the
+     * saturation and the bass mono-ing; params[0] = Noise sets the crackle
+     * independently, so you can have grit without mud or the reverse. */
+    float intensity = 0.3f + pfx_mod(s->params[1], pr, 0.7f) * 0.7f;
 
     /* --- 1. Warmth: gentle LP at ~10kHz, more with pressure --- */
     float warmth_f = 0.85f - intensity * 0.25f;
@@ -1635,25 +1771,50 @@ static void process_vinyl_sim(pfx_slot_t *s, float *l, float *r,
     *l = mid + side;
     *r = mid - side;
 
-    /* --- 4. Real vinyl crackle from sample loop --- */
+    /* --- 4. Crackle, from the sample loop when we have it --- */
+    float crackle_vol = pfx_mod(s->params[0], pr, 0.7f) * 0.755f;
+    float sample;
+
     if (e->vinyl_crackle_buf && e->vinyl_crackle_len > 0) {
-        float sample = (float)e->vinyl_crackle_buf[e->vinyl_crackle_pos] / 32768.0f;
+        sample = (float)e->vinyl_crackle_buf[e->vinyl_crackle_pos] / 32768.0f;
         e->vinyl_crackle_pos++;
         if (e->vinyl_crackle_pos >= e->vinyl_crackle_len)
             e->vinyl_crackle_pos = 0;
-
-        /* Scale crackle: subtle at rest, louder with pressure */
-        float crackle_vol = 0.15f + intensity * 0.35f;
-        float crackle = sample * crackle_vol;
-        *l += crackle;
-        *r += crackle;
+    } else {
+        /* Synthesised fallback. pfx_engine_load_vinyl_crackle() fails silently
+         * on a missing or malformed WAV, and without this the effect lost its
+         * defining feature and the Noise knob controlled nothing at all — with
+         * no way to tell from the device that anything was wrong.
+         *
+         * Vinyl surface noise is mostly sparse ticks over a quiet hiss bed, so
+         * that is what this generates: a ~0.3% chance per sample of a decaying
+         * click, plus low-level noise. */
+        float hiss = white_noise(&s->scatter_seed) * 0.05f;
+        if (s->crush_hold_r > 0.0001f) {
+            s->crush_hold_r *= 0.9994f;          /* click envelope */
+        } else if ((s->scatter_seed >> 8) % 331u == 0u) {
+            s->crush_hold_r = 0.35f + white_noise(&s->scatter_seed) * 0.2f;
+            s->crush_hold_l = white_noise(&s->scatter_seed) > 0.0f ? 1.0f : -1.0f;
+        }
+        sample = hiss + s->crush_hold_r * s->crush_hold_l;
     }
+
+    float crackle = sample * crackle_vol;
+    *l += crackle;
+    *r += crackle;
 }
 
-/* Pitch down: -1 octave via bungee pitch shift (speed=1.0, pitch=0.5) */
+/* Pitch shift down via bungee (speed=1.0, pitch<1.0).
+ * params[0] = Pitch: 0 -> two octaves down, 0.5 -> one octave (the fixed
+ * behaviour this had), 1.0 -> unshifted. params[1] = Tone. */
 static void process_pitch_down(pfx_slot_t *s, float *l, float *r) {
     pfx_bungee_t *b = (pfx_bungee_t *)s->bungee;
     if (!b) return;
+
+    float k = s->params[0];
+    float pitch = (k < 0.5f) ? (0.25f + k * 0.5f)          /* 0.25 -> 0.5 */
+                             : (0.5f + (k - 0.5f) * 1.0f); /* 0.5  -> 1.0 */
+    pfx_bungee_set_pitch(b, pitch);
 
     /* Feed live audio into bungee */
     float in_lr[2] = { *l, *r };
@@ -1665,6 +1826,8 @@ static void process_pitch_down(pfx_slot_t *s, float *l, float *r) {
 
     *l = out_lr[0];
     *r = out_lr[1];
+
+    distort_tone(s, l, r, s->params[1]);
 }
 
 /* ============================================================
@@ -1692,8 +1855,8 @@ static void process_slot(perf_fx_engine_t *e, int slot, float *l, float *r,
         case FX_REVERSE:
             process_reverse(s, l, r, e);
             break;
-        case FX_HALF_SPEED:
-            process_half_speed(s, l, r, e);
+        case FX_STRETCH:
+            process_stretch(s, l, r, e);
             break;
 
         /* Row 3: Filter Sweeps */
@@ -1772,13 +1935,48 @@ static void process_slot(perf_fx_engine_t *e, int slot, float *l, float *r,
         case FX_PITCH_DOWN:
             process_pitch_down(s, l, r);
             break;
-        case FX_TAPE_STOP:
+        case FX_VINYL_BRAKE:
             process_vinyl_brake(s, l, r);
             break;
     }
 }
 
-/* Process a single active slot with fade-out and tail handling */
+/* Wet amount, param index 2 on every slot without exception.
+ *
+ * Implemented once here rather than 32 times inside the effects. That is what
+ * makes "E6 is always Mix" true rather than aspirational, and it is why the
+ * process_* functions above no longer carry hardcoded 0.3/0.7-style blends —
+ * those constants moved into the descriptor table as per-slot defaults.
+ *
+ * The two topologies are genuinely different and must not be conflated:
+ *
+ *   INSERT — the effect replaced the signal, so crossfade dry against wet.
+ *            Mix 0 = bypass, Mix 1 = effect only.
+ *
+ *   SEND   — the effect added to the signal (delays, reverbs), so scale only
+ *            what it added and always keep the dry. Level 0 = no send,
+ *            Level 0.5 = the 0.7x these used to hardcode, Level 1 = 1.4x.
+ *            Crossfading here instead would make a delay throw at full wet
+ *            mute the track it is thrown from, which is not a delay throw. */
+static void apply_wet(int slot, const float *params,
+                      float dry_l, float dry_r, float *l, float *r) {
+    /* Only slots that declare a wet control get one. Everywhere else every
+     * param is an ordinary parameter and must not be read as a mix amount. */
+    int wp = pfx_fx_desc[slot].wet_param;
+    if (wp < 0) return;
+    float wet_amt = params[wp];
+
+    if (pfx_fx_desc[slot].topology == PFX_TOPO_SEND) {
+        float g = wet_amt * 1.4f;
+        *l = dry_l + (*l - dry_l) * g;
+        *r = dry_r + (*r - dry_r) * g;
+    } else {
+        *l = dry_l + (*l - dry_l) * wet_amt;
+        *r = dry_r + (*r - dry_r) * wet_amt;
+    }
+}
+
+/* Process a single active slot with wet mix, fade-out and tail handling */
 static void process_active_slot(perf_fx_engine_t *e, int i, float *l, float *r) {
     pfx_slot_t *s = &e->slots[i];
 
@@ -1795,6 +1993,8 @@ static void process_active_slot(perf_fx_engine_t *e, int i, float *l, float *r) 
 
     int feeding = s->active;
     process_slot(e, i, l, r, feeding);
+
+    apply_wet(i, s->params, dry_l, dry_r, l, r);
 
     /* Apply fade-out crossfade for non-space FX */
     if (s->fading_out) {
@@ -1851,8 +2051,8 @@ static void process_row4_chain(perf_fx_engine_t *e, float *l, float *r) {
     /* Stage 3: Scatter */
     process_active_slot(e, FX_SCATTER, l, r);
 
-    /* Stage 4: Half speed */
-    process_active_slot(e, FX_HALF_SPEED, l, r);
+    /* Stage 4: Timestretch */
+    process_active_slot(e, FX_STRETCH, l, r);
 }
 
 static void process_all_slots(perf_fx_engine_t *e, float *l, float *r) {
@@ -1870,14 +2070,10 @@ static void process_all_slots(perf_fx_engine_t *e, float *l, float *r) {
  * ============================================================ */
 
 void pfx_engine_render(perf_fx_engine_t *e, int16_t *out_lr, int frames) {
-    /* Read input audio */
+    /* Read input audio: the FX-chain input when the host hands us one,
+     * otherwise the shared output buffer. */
     int16_t *audio_src = NULL;
-    int use_track_mix = 0;
-
-    if (e->audio_source == SOURCE_TRACKS && e->track_audio_valid && e->track_mask) {
-        use_track_mix = 1;
-    } else if (e->direct_input) {
-        /* SOURCE_MOVE_MIX or default: use the audio FX chain input */
+    if (e->direct_input) {
         audio_src = e->direct_input;
     } else if (e->mapped_memory) {
         audio_src = (int16_t *)(e->mapped_memory + e->audio_out_offset);
@@ -1885,17 +2081,7 @@ void pfx_engine_render(perf_fx_engine_t *e, int16_t *out_lr, int frames) {
 
     /* Convert input to float */
     for (int i = 0; i < frames; i++) {
-        if (use_track_mix) {
-            float mix_l = 0.0f, mix_r = 0.0f;
-            for (int t = 0; t < PFX_TRACK_COUNT; t++) {
-                if ((e->track_mask & (1 << t)) && e->track_audio[t]) {
-                    mix_l += (float)e->track_audio[t][i * 2] / 32768.0f;
-                    mix_r += (float)e->track_audio[t][i * 2 + 1] / 32768.0f;
-                }
-            }
-            e->work_l[i] = mix_l;
-            e->work_r[i] = mix_r;
-        } else if (audio_src) {
+        if (audio_src) {
             e->work_l[i] = (float)audio_src[i * 2] / 32768.0f;
             e->work_r[i] = (float)audio_src[i * 2 + 1] / 32768.0f;
         } else {
@@ -1993,8 +2179,6 @@ int pfx_serialize_state(perf_fx_engine_t *e, char *buf, int buf_len) {
     SAFE_SNPRINTF(buf, n, buf_len, ",\"dry_wet\":%.3f", e->dry_wet);
     SAFE_SNPRINTF(buf, n, buf_len, ",\"repeat_rate\":%.3f", e->repeat_rate);
     SAFE_SNPRINTF(buf, n, buf_len, ",\"repeat_speed\":%.3f", e->repeat_speed);
-    SAFE_SNPRINTF(buf, n, buf_len, ",\"pressure_curve\":%d", e->pressure_curve);
-    /* audio_source and track_mask intentionally not persisted — always start as Move Mix */
     SAFE_SNPRINTF(buf, n, buf_len, ",\"last_touched\":%d", e->last_touched_slot);
 
     /* FX slots state */

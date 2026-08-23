@@ -76,22 +76,35 @@ All 32 pads are punch-in FX: hold a pad to activate, release to stop. Shift+hold
 | E6 | Per-FX param 3 (last touched pad) |
 | E7 | Tilt EQ (center = flat, left = bass boost, right = treble boost) |
 | E8 | DJ Filter (center = off, left = low-pass, right = high-pass) |
+| Shift+E8 | Global Dry/Wet |
 
 Touch any knob to see its current value on the display. Tap a latched pad to select it for E4-E6 editing without unlatching.
 
 ### Per-FX Knob Parameters (E4 / E5 / E6)
 
-Each effect has three dedicated parameters accessible via E4-E6 after touching that pad.
+Each effect has three dedicated parameters on E4-E6 after touching that pad.
+The display always shows the selected pad's own three labels, read from the
+DSP, so what you see is what the effect actually implements.
+
+**E6 is not always a wet control.** A wet amount is only given to effects where
+blending against the dry signal is a real technique — sends, and parallel
+processing. Anything that moves audio in time gets something more useful
+instead: the wet signal there is a delayed copy of the dry, so "mixing" the two
+comb-filters rather than blends.
 
 **Row 4 — Time/Repeat:**
 
 | Effect | E4 | E5 | E6 |
 |--------|----|----|-----|
-| RPT 1/4 – RPT TRP | Filter | Gate | — |
-| STUTTER | Filter | Gate | — |
+| RPT 1/4 – RPT TRP | Filter | Gate | Decay |
+| STUTTER | Filter | Gate | Decay |
 | SCATTER | Pattern | Gate | Reverse |
-| REVERSE | Feedback | Filter | Mix |
-| STRETCH | Tone | WowFlt | Mix |
+| REVERSE | Length | Filter | Decay |
+| STRETCH | Speed | Filter | — |
+
+Decay fades each successive repetition. STRETCH has no honest third control, so
+it declares none rather than carrying a filler knob. SCATTER's Pattern selects
+one of five slice orders — Shuffle, Stutter, Interleave, Scramble, Retrograde.
 
 **Row 3 — Filter Sweeps:**
 
@@ -99,12 +112,16 @@ Each effect has three dedicated parameters accessible via E4-E6 after touching t
 |--------|----|----|-----|
 | LP SWP | Speed | Reso | Depth |
 | HP SWP | Speed | Reso | Depth |
-| BP RISE | Speed | Reso | Width |
-| BP FALL | Speed | Reso | Width |
+| BP RISE | Speed | Reso | Depth |
+| BP FALL | Speed | Reso | Depth |
 | RESO SW | Speed | Reso | Mix |
 | PHASER | Depth | Feedback | Mix |
 | FLANGER | Depth | Feedback | Mix |
-| AUTOFLT | Depth | Center | Reso |
+| AUTOFLT | Depth | Reso | Center |
+
+Depth is how far the sweep travels. Blending dry back into a filter sweep just
+stops it sweeping, so the plain sweeps get Depth; the three that are classically
+used in parallel keep a Mix.
 
 **Row 2 — Space/Delay:**
 
@@ -114,23 +131,32 @@ Each effect has three dedicated parameters accessible via E4-E6 after touching t
 | DLY D8 | Feedback | Tone | Level |
 | PP 1/4 | Feedback | Tone | Level |
 | PP D8 | Feedback | Tone | Level |
-| ROOM | Time | Tone | Level |
-| HALL | Time | Tone | Level |
-| DK VERB | Time | Dark | Level |
-| SPRING | Time | Tone | Level |
+| ROOM | Decay | Tone | Level |
+| HALL | Decay | Tone | Level |
+| DK VERB | Decay | Tone | Level |
+| SPRING | Decay | Tone | Level |
+
+Level is the send amount, and the dry signal always survives underneath it.
 
 **Row 1 — Distortion/Rhythm:**
 
 | Effect | E4 | E5 | E6 |
 |--------|----|----|-----|
-| CRUSH | Filter | Tone | Mix |
-| DWNSMPL | Filter | Tone | Mix |
+| CRUSH | Bits | Tone | Mix |
+| DWNSMPL | Rate | Tone | Mix |
 | SATURATE | Drive | Tone | Mix |
-| GATE | Speed | Shape | Depth |
-| TREMOLO | Rate | Depth | Wave |
-| OCT DN | Tone | WowFlt | Mix |
-| VINYL | Noise | WowFlt | Tone |
-| VNL BRK | Speed | Tone | Mix |
+| GATE | Rate | Duty | Depth |
+| TREMOLO | Rate | Depth | Shape |
+| OCT DN | Pitch | Tone | Mix |
+| VINYL | Noise | Warmth | Mix |
+| VNL BRK | Rate | Noise | Tone |
+
+GATE's Depth is how far it ducks — the wet amount by its real name. TREMOLO's
+Shape morphs its LFO from sine to square; a Mix there would only have
+duplicated Depth.
+
+Knobs set the base value and pressure moves it either side of that, so a knob
+never takes expression away from the pad.
 
 ## Pressure
 
