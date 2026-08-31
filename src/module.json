@@ -2,7 +2,7 @@
     "id": "performance-fx",
     "name": "Performance FX",
     "abbrev": "PFX",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "32 punch-in audio FX with pressure control, shift+latch, animated sweeps and three knobs per effect",
     "author": "charlesvestal",
     "ui": "ui.js",
