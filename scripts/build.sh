@@ -47,6 +47,15 @@ echo "Cross prefix: $CROSS_PREFIX"
 mkdir -p build/bungee
 mkdir -p dist/performance-fx
 
+# -fno-gnu-unique on every C++ compile: a DSO that exports any STB_GNU_UNIQUE
+# symbol (function-local statics in inline/template code) is marked NODELETE
+# by glibc, so dlclose never unmaps it and a reload after a module update
+# reuses the old image (and its memory is never freed). Measured on a Move
+# 2026-10-03 with Dexed: after unload+reload the process still mapped the
+# replaced, deleted dsp.so. Verify with:
+#   readelf -W --dyn-syms dsp.so | awk '$5=="UNIQUE"'   (must be empty)
+NO_UNIQUE="-fno-gnu-unique"
+
 BUNGEE_DIR="src/dsp/bungee"
 
 # Step 1: Build PFFFT (FFT library)
@@ -60,7 +69,7 @@ ${CROSS_PREFIX}gcc -O3 -fPIC -ffast-math -fno-finite-math-only \
 echo "Building Bungee..."
 for src in ${BUNGEE_DIR}/src/*.cpp; do
     obj="build/bungee/$(basename "$src" .cpp).o"
-    ${CROSS_PREFIX}g++ -O3 -fPIC -std=c++20 -fwrapv \
+    ${CROSS_PREFIX}g++ -O3 -fPIC -std=c++20 -fwrapv $NO_UNIQUE \
         -I"${BUNGEE_DIR}/submodules/eigen" \
         -I"${BUNGEE_DIR}/submodules" \
         -I"${BUNGEE_DIR}" \
@@ -78,7 +87,7 @@ ${CROSS_PREFIX}ar rcs build/bungee/libbungee.a build/bungee/*.o
 
 # Step 4: Build the C++ bungee wrapper
 echo "Compiling Bungee wrapper..."
-${CROSS_PREFIX}g++ -O3 -fPIC -std=c++20 \
+${CROSS_PREFIX}g++ -O3 -fPIC -std=c++20 $NO_UNIQUE \
     -I"${BUNGEE_DIR}" \
     -Isrc/dsp \
     -c src/dsp/pfx_bungee.cpp -o build/pfx_bungee.o
