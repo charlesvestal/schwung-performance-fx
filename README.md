@@ -1,10 +1,10 @@
-# Move Everything Performance FX
+# Performance FX
 
-Live punch-in audio effects processor for [Move Everything](https://github.com/charlesvestal/move-everything) on Ableton Move hardware. 32 pressure-sensitive FX pads with latching.
+Live punch-in audio effects processor for [Schwung](https://github.com/charlesvestal/schwung) on Ableton Move hardware. 32 pressure-sensitive FX pads with latching.
 
 ## Prerequisites
 
-- [Move Everything](https://github.com/charlesvestal/move-everything) v0.7.10+ installed on your Ableton Move
+- [Schwung](https://github.com/charlesvestal/schwung) **0.12.0 or later** on your Ableton Move. Older hosts run the effects only on Schwung's own audio, so Move's mix passes through unchanged.
 
 ## Installation
 
